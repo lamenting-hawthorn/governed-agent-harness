@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-governance:contracts:v1:evidence_draft",
+  "title": "EvidenceDraft v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_type", "tenant_id", "event_id", "run_id", "event_kind", "occurred_at", "idempotency", "classification", "redaction_status"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "record_type": {"const": "evidence_draft"},
+    "tenant_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "event_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "run_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "event_kind": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+    "occurred_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "idempotency": {"$ref": "definitions.schema.json#/$defs/idempotency_binding"},
+    "classification": {"enum": ["public", "internal", "confidential", "restricted"]},
+    "redaction_status": {"const": "redacted"},
+    "inline_payload": {"$ref": "definitions.schema.json#/$defs/json_value"},
+    "protected_payload": {"$ref": "definitions.schema.json#/$defs/protected_payload_ref"},
+    "extensions": {"$ref": "definitions.schema.json#/$defs/extensions"}
+  },
+  "oneOf": [
+    {"required": ["inline_payload"], "not": {"required": ["protected_payload"]}},
+    {"required": ["protected_payload"], "not": {"required": ["inline_payload"]}}
+  ]
+}

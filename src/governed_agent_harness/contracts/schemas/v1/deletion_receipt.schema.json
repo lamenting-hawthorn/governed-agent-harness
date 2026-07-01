@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-governance:contracts:v1:deletion_receipt",
+  "title": "DeletionReceipt v1",
+  "description": "A tenant-bound preview or confirmed deletion result; confirmed deletion retains only authorized non-sensitive audit material.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_type", "tenant_id", "receipt_id", "request_id", "mode", "target_refs", "evidence_ids", "status", "idempotency", "issued_at", "receipt_digest"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "record_type": {"const": "deletion_receipt"},
+    "tenant_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "receipt_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "request_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "mode": {"enum": ["preview", "confirmed"]},
+    "target_refs": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "tombstone_refs": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "evidence_ids": {"type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": {"$ref": "definitions.schema.json#/$defs/uuid_v7"}},
+    "status": {"enum": ["previewed", "deleted", "duplicate_replayed", "rejected"]},
+    "idempotency": {"$ref": "definitions.schema.json#/$defs/idempotency_binding"},
+    "issued_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "receipt_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "extensions": {"$ref": "definitions.schema.json#/$defs/extensions"}
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "mode": {"const": "preview"},
+        "status": {"enum": ["previewed", "rejected"]}
+      },
+      "not": {"required": ["tombstone_refs"]}
+    },
+    {
+      "properties": {
+        "mode": {"const": "confirmed"},
+        "status": {"enum": ["deleted", "duplicate_replayed"]}
+      },
+      "required": ["tombstone_refs"]
+    },
+    {
+      "properties": {
+        "mode": {"const": "confirmed"},
+        "status": {"const": "rejected"}
+      },
+      "not": {"required": ["tombstone_refs"]}
+    }
+  ]
+}

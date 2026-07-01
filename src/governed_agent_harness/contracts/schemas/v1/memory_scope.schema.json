@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-governance:contracts:v1:memory_scope",
+  "title": "MemoryScope v1",
+  "description": "A single tenant-bound scope selection derived from, and no broader or longer-lived than, its immediate ActorContext or MemoryScope parent. The validity interval begins at derived_at and ends at valid_until.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_type", "scope_id", "tenant_id", "actor_id", "parent_record_type", "parent_digest", "selection", "derived_at", "valid_until"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "record_type": {"const": "memory_scope"},
+    "scope_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "tenant_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "actor_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "parent_record_type": {"enum": ["actor_context", "memory_scope"]},
+    "parent_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "selection": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["level"],
+          "properties": {"level": {"const": "actor"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["level", "user_id"],
+          "properties": {
+            "level": {"const": "user"},
+            "user_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["level", "session_id"],
+          "properties": {
+            "level": {"const": "session"},
+            "session_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["level", "workspace_id"],
+          "properties": {
+            "level": {"const": "workspace"},
+            "workspace_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["level", "project_id"],
+          "properties": {
+            "level": {"const": "project"},
+            "project_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["level", "team_id"],
+          "properties": {
+            "level": {"const": "team"},
+            "team_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["level", "organization_id"],
+          "properties": {
+            "level": {"const": "organization"},
+            "organization_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["level"],
+          "properties": {"level": {"const": "public"}}
+        }
+      ]
+    },
+    "derived_at": {
+      "description": "Time at which this scope was derived. It must be no later than valid_until; sibling-field chronology is a validator duty.",
+      "$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"
+    },
+    "valid_until": {
+      "description": "Required validity ceiling. It must be no earlier than derived_at and no later than the immediate parent authority validity: ActorContext.expires_at or MemoryScope.valid_until. These cross-record comparisons are validator duties.",
+      "$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"
+    },
+    "extensions": {"$ref": "definitions.schema.json#/$defs/extensions"}
+  }
+}

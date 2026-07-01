@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-governance:contracts:v1:actor_context",
+  "title": "ActorContext v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_type", "tenant_id", "actor_id", "session_id", "auth", "roles", "capabilities", "trust_level", "scope_authority", "issued_at", "expires_at", "correlation_id"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "record_type": {"const": "actor_context"},
+    "tenant_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "actor_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "session_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issuer", "method", "assurance_level", "verified_at"],
+      "properties": {
+        "issuer": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+        "method": {"enum": ["federated", "service_credential", "session_credential", "hardware_assertion"]},
+        "assurance_level": {"type": "integer", "minimum": 1, "maximum": 4},
+        "verified_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"}
+      }
+    },
+    "roles": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"$ref": "definitions.schema.json#/$defs/short_identifier"}},
+    "capabilities": {"type": "array", "maxItems": 128, "uniqueItems": true, "items": {"$ref": "definitions.schema.json#/$defs/short_identifier"}},
+    "trust_level": {"enum": ["verified_human", "verified_service", "delegated_service", "restricted_automation"]},
+    "scope_authority": {
+      "description": "Authority from which a MemoryScope may be narrowed. Actor and session identifiers are intrinsic to this context; broader memberships are explicit.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowed_levels", "public_allowed"],
+      "properties": {
+        "allowed_levels": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 7,
+          "uniqueItems": true,
+          "items": {"enum": ["actor", "user", "session", "workspace", "project", "team", "organization"]}
+        },
+        "user_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+        "team_ids": {"type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": {"$ref": "definitions.schema.json#/$defs/uuid_v7"}},
+        "organization_ids": {"type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": {"$ref": "definitions.schema.json#/$defs/uuid_v7"}},
+        "project_ids": {"type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": {"$ref": "definitions.schema.json#/$defs/uuid_v7"}},
+        "workspace_ids": {"type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": {"$ref": "definitions.schema.json#/$defs/uuid_v7"}},
+        "public_allowed": {"type": "boolean"}
+      }
+    },
+    "issued_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "expires_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "correlation_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "extensions": {"$ref": "definitions.schema.json#/$defs/extensions"}
+  }
+}

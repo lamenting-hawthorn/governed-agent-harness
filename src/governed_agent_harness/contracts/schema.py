@@ -6,6 +6,8 @@ import json
 import re
 from collections.abc import Mapping
 from datetime import datetime
+from importlib.resources import files
+from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -106,10 +108,8 @@ def _validate_format(value: str, format_name: str, path: str) -> None:
 class SchemaStore:
     """Load and validate the immutable canonical v1 schema set."""
 
-    def __init__(self, schema_directory: Path | None = None) -> None:
-        self.schema_directory = schema_directory or (
-            Path(__file__).resolve().parents[3] / "contracts" / "v1"
-        )
+    def __init__(self, schema_directory: Path | Traversable | None = None) -> None:
+        self.schema_directory = schema_directory or files(__package__).joinpath("schemas", "v1")
         self._documents: dict[str, dict[str, Any]] = {}
         self._catalog: dict[str, str] | None = None
 
@@ -138,11 +138,9 @@ class SchemaStore:
     def _load_json(self, name: str) -> dict[str, Any]:
         if name in self._documents:
             return self._documents[name]
-        path = (self.schema_directory / name).resolve()
-        try:
-            path.relative_to(self.schema_directory.resolve())
-        except ValueError as exc:
-            raise SchemaError(f"schema reference escapes canonical directory: {name!r}") from exc
+        if Path(name).name != name:
+            raise SchemaError(f"schema reference escapes canonical directory: {name!r}")
+        path = self.schema_directory.joinpath(name)
         try:
             with path.open("r", encoding="utf-8") as handle:
                 document = json.load(handle)

@@ -106,13 +106,21 @@ def _write_fixtures(expected: dict[str, bytes]) -> None:
         (FIXTURE_DIRECTORY / name).write_bytes(payload)
 
 
+def _fixture_payload(name: str, expected: dict[str, bytes]) -> bytes:
+    path = FIXTURE_DIRECTORY / name
+    if path.is_file():
+        payload = path.read_bytes()
+        if payload != expected[name]:
+            raise ContractError(f"fixture is not deterministically generated: {name}")
+        return payload
+    return expected[name]
+
+
 def _load_record_fixtures(expected: dict[str, bytes]) -> dict[str, dict[str, object]]:
     records: dict[str, dict[str, object]] = {}
     for record_type in DEFAULT_SCHEMA_STORE.catalog:
         name = f"{record_type}.json"
-        payload = (FIXTURE_DIRECTORY / name).read_bytes()
-        if payload != expected[name]:
-            raise ContractError(f"fixture is not deterministically generated: {name}")
+        payload = _fixture_payload(name, expected)
         model = parse_model(payload, expected_tenant=TENANT_ID)
         if model.RECORD_TYPE != record_type:
             raise ContractError(f"fixture model mismatch: {name}")
@@ -123,9 +131,7 @@ def _load_record_fixtures(expected: dict[str, bytes]) -> dict[str, dict[str, obj
 def _check_vectors(expected: dict[str, bytes]) -> int:
     count = 0
     for name in ("canonicalization_vectors.json", "digest_vectors.json"):
-        payload = (FIXTURE_DIRECTORY / name).read_bytes()
-        if payload != expected[name]:
-            raise ContractError(f"fixture vector is not deterministically generated: {name}")
+        payload = _fixture_payload(name, expected)
         vectors = json.loads(payload)
         for vector in vectors:
             actual = canonical_bytes(vector["input"]).decode("utf-8")
@@ -397,7 +403,7 @@ def run(*, write: bool = False) -> str:
     _check_receipt_proofs(records)
     expected_names = set(expected)
     actual_names = {path.name for path in FIXTURE_DIRECTORY.glob("*.json")}
-    if actual_names != expected_names:
+    if FIXTURE_DIRECTORY.is_dir() and actual_names != expected_names:
         raise ContractError(
             f"positive fixture file set differs: missing={sorted(expected_names - actual_names)}, "
             f"extra={sorted(actual_names - expected_names)}"

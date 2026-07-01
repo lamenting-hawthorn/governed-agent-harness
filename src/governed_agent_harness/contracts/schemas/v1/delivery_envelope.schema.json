@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-governance:contracts:v1:delivery_envelope",
+  "title": "DeliveryEnvelope v1",
+  "description": "A reviewed artifact delivery record. Delivery never establishes activation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_type", "tenant_id", "delivery_id", "target_scope", "artifact_type", "artifact_id", "artifact_revision", "artifact_digest", "gate_decision_ref", "evidence_refs", "provenance_digest", "producer_version", "runtime_version", "policy_refs", "reviewer_refs", "compatibility", "rollback_metadata", "lifecycle_state", "idempotency", "issued_at", "expires_at", "envelope_digest", "proof"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "record_type": {"const": "delivery_envelope"},
+    "tenant_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "delivery_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "target_scope": {"$ref": "memory_scope.schema.json"},
+    "artifact_type": {"enum": ["memory", "skill", "policy"]},
+    "artifact_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "artifact_revision": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+    "artifact_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "gate_decision_ref": {"$ref": "definitions.schema.json#/$defs/record_ref"},
+    "evidence_refs": {"type": "array", "minItems": 1, "maxItems": 4096, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "provenance_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "producer_version": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+    "runtime_version": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+    "policy_refs": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "reviewer_refs": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "compatibility": {"$ref": "definitions.schema.json#/$defs/compatibility"},
+    "rollback_metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["strategy", "previous_active_ref"],
+      "properties": {
+        "strategy": {"enum": ["restore_previous_revision", "deactivate_revision", "forward_compensation"]},
+        "previous_active_ref": {"oneOf": [{"$ref": "definitions.schema.json#/$defs/record_ref"}, {"type": "null"}]}
+      }
+    },
+    "lifecycle_state": {"enum": ["exported", "delivered", "delivery_failed", "rejected_by_runtime", "legacy_exported"]},
+    "idempotency": {"$ref": "definitions.schema.json#/$defs/idempotency_binding"},
+    "issued_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "expires_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "envelope_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "proof": {
+      "allOf": [
+        {"$ref": "definitions.schema.json#/$defs/integrity_proof"},
+        {"properties": {"proof_domain": {"const": "delivery_envelope.v1"}}}
+      ]
+    },
+    "extensions": {"$ref": "definitions.schema.json#/$defs/extensions"}
+  }
+}

@@ -1,0 +1,225 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-governance:contracts:v1:definitions",
+  "title": "Canonical v1 shared definitions",
+  "description": "Shared structural primitives for the canonical v1 wire contracts.",
+  "$defs": {
+    "uuid_v7": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "timestamp_utc_ms": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "sha256_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "short_identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._:/-]{0,126}[A-Za-z0-9])?$"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    },
+    "non_negative_integer": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "positive_integer": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "ratio_millionths": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000000
+    },
+    "json_scalar": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991},
+        {"type": "string", "maxLength": 8192}
+      ]
+    },
+    "json_value": {
+      "oneOf": [
+        {"$ref": "#/$defs/json_scalar"},
+        {
+          "type": "array",
+          "maxItems": 64,
+          "items": {"$ref": "#/$defs/json_value"}
+        },
+        {
+          "type": "object",
+          "maxProperties": 64,
+          "propertyNames": {"type": "string", "minLength": 1, "maxLength": 128},
+          "additionalProperties": {"$ref": "#/$defs/json_value"}
+        }
+      ]
+    },
+    "extension_scalar": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991},
+        {"type": "string", "maxLength": 256}
+      ]
+    },
+    "extension_value": {
+      "oneOf": [
+        {"$ref": "#/$defs/extension_scalar"},
+        {
+          "type": "array",
+          "maxItems": 4,
+          "items": {"$ref": "#/$defs/extension_scalar"}
+        },
+        {
+          "type": "object",
+          "maxProperties": 4,
+          "propertyNames": {"type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[a-z][a-z0-9_]*$"},
+          "additionalProperties": {"$ref": "#/$defs/extension_scalar"}
+        }
+      ]
+    },
+    "extensions": {
+      "type": "object",
+      "maxProperties": 16,
+      "propertyNames": {
+        "type": "string",
+        "maxLength": 190,
+        "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+/[a-z][a-z0-9_]{0,63}$"
+      },
+      "additionalProperties": {"$ref": "#/$defs/extension_value"}
+    },
+    "idempotency_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tenant_id", "idempotency_key", "operation_digest"],
+      "properties": {
+        "tenant_id": {"$ref": "#/$defs/uuid_v7"},
+        "idempotency_key": {"$ref": "#/$defs/idempotency_key"},
+        "operation_digest": {"$ref": "#/$defs/sha256_digest"}
+      }
+    },
+    "integrity_proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issuer", "key_id", "algorithm", "proof_domain", "object_digest", "nonce", "detached_proof"],
+      "properties": {
+        "issuer": {"$ref": "#/$defs/short_identifier"},
+        "key_id": {"$ref": "#/$defs/short_identifier"},
+        "algorithm": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+        "proof_domain": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z][a-z0-9_.-]*\\.v1$"},
+        "object_digest": {"$ref": "#/$defs/sha256_digest"},
+        "nonce": {"type": "string", "minLength": 22, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$"},
+        "detached_proof": {"type": "string", "minLength": 43, "maxLength": 2048, "pattern": "^[A-Za-z0-9_-]+$"}
+      }
+    },
+    "protected_payload_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tenant_id", "uri", "payload_digest", "size_bytes", "media_type", "encryption_key_id", "retention_until"],
+      "properties": {
+        "tenant_id": {"$ref": "#/$defs/uuid_v7"},
+        "uri": {"type": "string", "format": "uri", "minLength": 1, "maxLength": 2048},
+        "payload_digest": {"$ref": "#/$defs/sha256_digest"},
+        "size_bytes": {"$ref": "#/$defs/non_negative_integer"},
+        "media_type": {"type": "string", "minLength": 3, "maxLength": 128, "pattern": "^[a-z0-9][a-z0-9!#$&^_.+-]+/[a-z0-9][a-z0-9!#$&^_.+-]+$"},
+        "encryption_key_id": {"$ref": "#/$defs/short_identifier"},
+        "retention_until": {"$ref": "#/$defs/timestamp_utc_ms"}
+      }
+    },
+    "evidence_span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence_id", "payload_digest"],
+      "properties": {
+        "evidence_id": {"$ref": "#/$defs/uuid_v7"},
+        "payload_digest": {"$ref": "#/$defs/sha256_digest"},
+        "json_pointer": {"type": "string", "maxLength": 1024, "pattern": "^(?:|/(?:[^~/]|~[01])*)$"},
+        "span_digest": {"$ref": "#/$defs/sha256_digest"}
+      }
+    },
+    "truth_confidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value_millionths", "basis", "evidence_ids"],
+      "properties": {
+        "value_millionths": {"$ref": "#/$defs/ratio_millionths"},
+        "basis": {"enum": ["observed", "reported", "inferred", "derived", "contested"]},
+        "evidence_ids": {"type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": {"$ref": "#/$defs/uuid_v7"}}
+      }
+    },
+    "task_quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["score_millionths", "metric", "evaluator_version"],
+      "properties": {
+        "score_millionths": {"$ref": "#/$defs/ratio_millionths"},
+        "metric": {"$ref": "#/$defs/short_identifier"},
+        "evaluator_version": {"$ref": "#/$defs/short_identifier"}
+      }
+    },
+    "retention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy_id", "expires_at", "deletion_mode"],
+      "properties": {
+        "policy_id": {"$ref": "#/$defs/short_identifier"},
+        "expires_at": {"$ref": "#/$defs/timestamp_utc_ms"},
+        "deletion_mode": {"enum": ["delete_payload", "cryptographic_erasure", "retain_non_sensitive_tombstone"]}
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_versions", "runtime_version_range"],
+      "properties": {
+        "contract_versions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {"type": "string", "maxLength": 160, "pattern": "^[a-z][a-z0-9_]*=1\\.0$"}
+        },
+        "runtime_version_range": {"type": "string", "minLength": 1, "maxLength": 128}
+      }
+    },
+    "constraint_set": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["constraint_id", "constraint_version", "parameters", "parameters_digest"],
+        "properties": {
+          "constraint_id": {"type": "string", "minLength": 3, "maxLength": 190, "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+/[a-z][a-z0-9_]{0,63}$"},
+          "constraint_version": {"$ref": "#/$defs/short_identifier"},
+          "parameters": {"$ref": "#/$defs/json_value"},
+          "parameters_digest": {"$ref": "#/$defs/sha256_digest"}
+        }
+      }
+    },
+    "record_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_type", "record_id", "record_digest"],
+      "properties": {
+        "record_type": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9_]*$"},
+        "record_id": {"$ref": "#/$defs/uuid_v7"},
+        "record_digest": {"$ref": "#/$defs/sha256_digest"}
+      }
+    }
+  }
+}

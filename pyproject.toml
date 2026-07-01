@@ -18,6 +18,9 @@ test = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"governed_agent_harness.contracts" = ["schemas/v1/*.json"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
