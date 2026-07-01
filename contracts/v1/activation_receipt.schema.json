@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-governance:contracts:v1:activation_receipt",
+  "title": "ActivationReceipt v1",
+  "description": "The runtime-authority record that establishes activation after successful verification.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_type", "tenant_id", "receipt_id", "issuer_role", "target_scope", "delivery_id", "delivery_digest", "artifact_type", "artifact_id", "artifact_revision", "artifact_digest", "activated_revision", "evidence_refs", "provenance_digest", "producer_version", "runtime_version", "status", "policy_refs", "reviewer_refs", "compatibility", "idempotency", "issued_at", "expires_at", "receipt_digest", "proof"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "record_type": {"const": "activation_receipt"},
+    "tenant_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "receipt_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "issuer_role": {"const": "runtime_authority"},
+    "target_scope": {"$ref": "memory_scope.schema.json"},
+    "delivery_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "delivery_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "artifact_type": {"enum": ["memory", "skill", "policy"]},
+    "artifact_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "artifact_revision": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+    "artifact_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "activated_revision": {"$ref": "definitions.schema.json#/$defs/record_ref"},
+    "previous_active_ref": {"oneOf": [{"$ref": "definitions.schema.json#/$defs/record_ref"}, {"type": "null"}]},
+    "evidence_refs": {"type": "array", "minItems": 1, "maxItems": 256, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "provenance_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "producer_version": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+    "runtime_version": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+    "status": {"const": "activated"},
+    "policy_refs": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "reviewer_refs": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "compatibility": {"$ref": "definitions.schema.json#/$defs/compatibility"},
+    "idempotency": {"$ref": "definitions.schema.json#/$defs/idempotency_binding"},
+    "issued_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "expires_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "receipt_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "proof": {
+      "allOf": [
+        {"$ref": "definitions.schema.json#/$defs/integrity_proof"},
+        {"properties": {"proof_domain": {"const": "activation_receipt.v1"}}}
+      ]
+    },
+    "extensions": {"$ref": "definitions.schema.json#/$defs/extensions"}
+  }
+}

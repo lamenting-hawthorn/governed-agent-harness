@@ -1,0 +1,89 @@
+{
+  "schema_version": "1.0",
+  "record_type": "evaluation_run",
+  "tenant_id": "018f0000-0000-7000-8000-000000000001",
+  "evaluation_id": "018f0000-0000-7000-8000-000000000021",
+  "target_scope": {
+    "schema_version": "1.0",
+    "record_type": "memory_scope",
+    "scope_id": "018f0000-0000-7000-8000-000000000005",
+    "tenant_id": "018f0000-0000-7000-8000-000000000001",
+    "actor_id": "018f0000-0000-7000-8000-000000000002",
+    "parent_record_type": "actor_context",
+    "parent_digest": "sha256:eaa0f1c67d60a24074f87d824ec6267bf04ca492ff330844c17ee715e4fa08df",
+    "selection": {
+      "level": "project",
+      "project_id": "018f0000-0000-7000-8000-00000000002e"
+    },
+    "derived_at": "2026-01-01T00:00:02.000Z",
+    "valid_until": "2026-01-01T01:00:00.000Z"
+  },
+  "dataset_ref": {
+    "record_type": "dataset_version",
+    "record_id": "018f0000-0000-7000-8000-00000000001d",
+    "record_digest": "sha256:cc304be081da08786b54fdd9c9113ccf7013b2561d3fafbeb4399b802a5e45f1"
+  },
+  "evaluator_id": "fixture.evaluator",
+  "evaluator_version": "1.0",
+  "configuration_digest": "sha256:9bf0674622287a7b0f456a25553f673a7888f381ecfd463731f135d48cc41377",
+  "environment_digest": "sha256:b36a4a78dbd8b54a32e44bc5d53644ead1af9970fbb5a1d49a79eb0e03bb99c9",
+  "versions": {
+    "runtime": "runtime.v1",
+    "toolset": "toolset.v1",
+    "model": "model.v1",
+    "skillset": "skillset.v1",
+    "policy": "policy.v1"
+  },
+  "seed": 7,
+  "lifecycle_state": "completed",
+  "checkpoint_refs": [],
+  "result_refs": [
+    {
+      "record_type": "action_outcome",
+      "record_id": "018f0000-0000-7000-8000-00000000001b",
+      "record_digest": "sha256:96a6a8f8db7ae7146150958b1d114e7d9a53265ee34207395870974aaa004259"
+    }
+  ],
+  "mandatory_artifact_refs": [
+    {
+      "record_type": "action_outcome",
+      "record_id": "018f0000-0000-7000-8000-00000000001b",
+      "record_digest": "sha256:96a6a8f8db7ae7146150958b1d114e7d9a53265ee34207395870974aaa004259"
+    }
+  ],
+  "task_quality": {
+    "score_millionths": 850000,
+    "metric": "fixture.quality",
+    "evaluator_version": "evaluator.v1"
+  },
+  "policy_refs": [
+    {
+      "record_type": "policy_proposal",
+      "record_id": "018f0000-0000-7000-8000-00000000005a",
+      "record_digest": "sha256:0a2e5f05be4f91c4ce301cd0d57ea112eed02bb71bad73c69f34ce3e7ca38f9c"
+    }
+  ],
+  "reviewer_refs": [
+    {
+      "record_type": "approval_record",
+      "record_id": "018f0000-0000-7000-8000-000000000017",
+      "record_digest": "sha256:12bed50694285a872224ca05220a0df245559ca5898a753a0a0a5e933bd283cb"
+    }
+  ],
+  "compatibility": {
+    "contract_versions": [
+      "evaluation_run=1.0",
+      "dataset_version=1.0"
+    ],
+    "runtime_version_range": ">=1.0"
+  },
+  "created_at": "2026-01-01T00:17:00.000Z",
+  "started_at": "2026-01-01T00:18:00.000Z",
+  "completed_at": "2026-01-01T00:19:00.000Z",
+  "idempotency": {
+    "tenant_id": "018f0000-0000-7000-8000-000000000001",
+    "idempotency_key": "fixture.operation.0010",
+    "operation_digest": "sha256:18ca75e905fb72a5216c9170f552c52518c795f9342f37d9c9a1d169bca8918d"
+  },
+  "run_digest": "sha256:bad937983d388fb364900228d1061c591d97fc84365855281c671d1ebb548681"
+}

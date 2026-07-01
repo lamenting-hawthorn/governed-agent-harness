@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0",
+  "record_type": "capability_manifest",
+  "tenant_id": "018f0000-0000-7000-8000-000000000001",
+  "manifest_id": "018f0000-0000-7000-8000-00000000001a",
+  "adapter_id": "fixture.adapter",
+  "adapter_version": "1.0",
+  "effect_classes": [
+    "write_external"
+  ],
+  "capability_level": "gate",
+  "limitations": [
+    "Synthetic fixture only"
+  ],
+  "proof_suite": {
+    "suite_id": "fixture.suite",
+    "revision": "1.0",
+    "result_digest": "sha256:873d2f182ded3a4b688c39f22c19663cdd42abdc969b4d16595d2a758abb390a"
+  },
+  "verified_at": "2026-01-01T00:12:00.000Z",
+  "manifest_digest": "sha256:67c8e5434258644f34688f0c159592b7cd40669a2c7c671ae255cc2a90949746"
+}

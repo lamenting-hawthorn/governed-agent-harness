@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-governance:contracts:v1:tool_request",
+  "title": "ToolRequest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_type", "tenant_id", "actor_id", "actor_context_digest", "run_id", "request_id", "tool_id", "tool_version", "arguments", "effect_classes", "request_digest", "idempotency", "requested_at"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "record_type": {"const": "tool_request"},
+    "tenant_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "actor_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "actor_context_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "run_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "request_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "tool_id": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+    "tool_version": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+    "arguments": {"type": "object", "maxProperties": 128, "propertyNames": {"type": "string", "minLength": 1, "maxLength": 128}, "additionalProperties": {"$ref": "definitions.schema.json#/$defs/json_value"}},
+    "effect_classes": {"type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true, "items": {"enum": ["read_external", "write_external", "communicate_external", "execute_code", "access_secret", "export_data", "change_authorization", "financial", "physical", "destructive"]}},
+    "request_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "idempotency": {"$ref": "definitions.schema.json#/$defs/idempotency_binding"},
+    "requested_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "extensions": {"$ref": "definitions.schema.json#/$defs/extensions"}
+  }
+}

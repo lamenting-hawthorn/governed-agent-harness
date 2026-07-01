@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-governance:contracts:v1:capability_manifest",
+  "title": "CapabilityManifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_type", "tenant_id", "manifest_id", "adapter_id", "adapter_version", "effect_classes", "capability_level", "limitations", "proof_suite", "verified_at", "manifest_digest"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "record_type": {"const": "capability_manifest"},
+    "tenant_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "manifest_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "adapter_id": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+    "adapter_version": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+    "effect_classes": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"enum": ["read_external", "write_external", "communicate_external", "execute_code", "access_secret", "export_data", "change_authorization", "financial", "physical", "destructive"]}},
+    "capability_level": {"enum": ["observe", "advise", "gate", "isolate"]},
+    "limitations": {"type": "array", "maxItems": 64, "items": {"type": "string", "minLength": 1, "maxLength": 1024}},
+    "proof_suite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["suite_id", "revision", "result_digest"],
+      "properties": {
+        "suite_id": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+        "revision": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+        "result_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"}
+      }
+    },
+    "verified_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "manifest_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "extensions": {"$ref": "definitions.schema.json#/$defs/extensions"}
+  }
+}

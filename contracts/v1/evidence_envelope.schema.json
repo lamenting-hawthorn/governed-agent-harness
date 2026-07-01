@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-governance:contracts:v1:evidence_envelope",
+  "title": "EvidenceEnvelope v1",
+  "description": "A storage-authored append-only, tamper-evident evidence record.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_type", "tenant_id", "envelope_id", "draft", "draft_digest", "recorded_at", "sequence_number", "payload_digest", "prior_event_digest", "event_digest", "policy_refs", "storage_writer_id"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "record_type": {"const": "evidence_envelope"},
+    "tenant_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "envelope_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "draft": {"$ref": "evidence_draft.schema.json"},
+    "draft_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "recorded_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "sequence_number": {"$ref": "definitions.schema.json#/$defs/non_negative_integer"},
+    "payload_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "prior_event_digest": {"oneOf": [{"$ref": "definitions.schema.json#/$defs/sha256_digest"}, {"type": "null"}]},
+    "event_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "policy_refs": {"type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "storage_writer_id": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+    "extensions": {"$ref": "definitions.schema.json#/$defs/extensions"}
+  }
+}

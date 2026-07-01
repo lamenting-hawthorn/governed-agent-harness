@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-governance:contracts:v1:learning_trace_envelope",
+  "title": "LearningTraceEnvelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_type", "tenant_id", "trace_id", "run_id", "scope", "completion_state", "evidence_refs", "tool_evidence_refs", "versions", "source_digest", "normalized_digest", "redaction", "retention", "exported_at", "export_digest", "idempotency"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "record_type": {"const": "learning_trace_envelope"},
+    "tenant_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "trace_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "run_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "scope": {"$ref": "memory_scope.schema.json"},
+    "completion_state": {"const": "completed"},
+    "evidence_refs": {"type": "array", "minItems": 1, "maxItems": 4096, "uniqueItems": true, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "tool_evidence_refs": {"type": "array", "maxItems": 4096, "uniqueItems": true, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime", "adapter", "contract_set"],
+      "properties": {
+        "runtime": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+        "adapter": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+        "contract_set": {"const": "1.0"}
+      }
+    },
+    "source_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "normalized_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy_id", "status"],
+      "properties": {"policy_id": {"$ref": "definitions.schema.json#/$defs/short_identifier"}, "status": {"const": "redacted"}}
+    },
+    "retention": {"$ref": "definitions.schema.json#/$defs/retention"},
+    "exported_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "export_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "idempotency": {"$ref": "definitions.schema.json#/$defs/idempotency_binding"},
+    "extensions": {"$ref": "definitions.schema.json#/$defs/extensions"}
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "schema_version": "1.0",
+  "record_type": "gate_decision",
+  "tenant_id": "018f0000-0000-7000-8000-000000000001",
+  "gate_id": "018f0000-0000-7000-8000-000000000026",
+  "target_scope": {
+    "schema_version": "1.0",
+    "record_type": "memory_scope",
+    "scope_id": "018f0000-0000-7000-8000-000000000005",
+    "tenant_id": "018f0000-0000-7000-8000-000000000001",
+    "actor_id": "018f0000-0000-7000-8000-000000000002",
+    "parent_record_type": "actor_context",
+    "parent_digest": "sha256:eaa0f1c67d60a24074f87d824ec6267bf04ca492ff330844c17ee715e4fa08df",
+    "selection": {
+      "level": "project",
+      "project_id": "018f0000-0000-7000-8000-00000000002e"
+    },
+    "derived_at": "2026-01-01T00:00:02.000Z",
+    "valid_until": "2026-01-01T01:00:00.000Z"
+  },
+  "proposal_refs": [
+    {
+      "record_type": "skill_proposal",
+      "record_id": "018f0000-0000-7000-8000-000000000022",
+      "record_digest": "sha256:4984840a07bf4e541ac9da5aa6570b4f7d737f08908e99b98eb978fa3cb33a42"
+    }
+  ],
+  "evaluation_refs": [
+    {
+      "record_type": "evaluation_run",
+      "record_id": "018f0000-0000-7000-8000-000000000021",
+      "record_digest": "sha256:bad937983d388fb364900228d1061c591d97fc84365855281c671d1ebb548681"
+    }
+  ],
+  "provenance_digest": "sha256:4b87e26228fa6d02db48ad20c5bc47fad4ac5597757c72997bf33ca3272d3f07",
+  "producer_version": "producer.v1",
+  "runtime_version": "runtime.v1",
+  "decision": "approve",
+  "eligibility_checks": {
+    "reproducible_evaluation": true,
+    "mandatory_artifacts_present": true,
+    "policy_current": true,
+    "review_complete": true
+  },
+  "task_quality": {
+    "score_millionths": 850000,
+    "metric": "fixture.quality",
+    "evaluator_version": "evaluator.v1"
+  },
+  "policy_refs": [
+    {
+      "record_type": "policy_proposal",
+      "record_id": "018f0000-0000-7000-8000-00000000005a",
+      "record_digest": "sha256:0a2e5f05be4f91c4ce301cd0d57ea112eed02bb71bad73c69f34ce3e7ca38f9c"
+    }
+  ],
+  "reviewer_refs": [
+    {
+      "record_type": "approval_record",
+      "record_id": "018f0000-0000-7000-8000-000000000017",
+      "record_digest": "sha256:12bed50694285a872224ca05220a0df245559ca5898a753a0a0a5e933bd283cb"
+    }
+  ],
+  "compatibility": {
+    "contract_versions": [
+      "gate_decision=1.0",
+      "evaluation_run=1.0"
+    ],
+    "runtime_version_range": ">=1.0"
+  },
+  "issued_at": "2026-01-01T00:22:00.000Z",
+  "decision_digest": "sha256:6bc018680ebd7d1b1c409d2cebff385555a5f789f32d980188f9616f4fecc97b"
+}

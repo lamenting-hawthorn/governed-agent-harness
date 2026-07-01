@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-governance:contracts:v1:evaluation_run",
+  "title": "EvaluationRun v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_type", "tenant_id", "evaluation_id", "target_scope", "dataset_ref", "evaluator_id", "evaluator_version", "configuration_digest", "environment_digest", "versions", "lifecycle_state", "checkpoint_refs", "result_refs", "mandatory_artifact_refs", "policy_refs", "reviewer_refs", "compatibility", "created_at", "idempotency", "run_digest"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "record_type": {"const": "evaluation_run"},
+    "tenant_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "evaluation_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "target_scope": {"$ref": "memory_scope.schema.json"},
+    "dataset_ref": {"$ref": "definitions.schema.json#/$defs/record_ref"},
+    "evaluator_id": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+    "evaluator_version": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+    "configuration_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "environment_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime", "toolset", "model", "skillset", "policy"],
+      "properties": {
+        "runtime": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+        "toolset": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+        "model": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+        "skillset": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+        "policy": {"$ref": "definitions.schema.json#/$defs/short_identifier"}
+      }
+    },
+    "seed": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+    "lifecycle_state": {"enum": ["queued", "running", "completed", "failed", "cancelled"]},
+    "checkpoint_refs": {"type": "array", "maxItems": 4096, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "result_refs": {"type": "array", "maxItems": 65536, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "mandatory_artifact_refs": {"type": "array", "maxItems": 256, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "task_quality": {"$ref": "definitions.schema.json#/$defs/task_quality"},
+    "policy_refs": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "reviewer_refs": {"type": "array", "maxItems": 64, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "compatibility": {"$ref": "definitions.schema.json#/$defs/compatibility"},
+    "created_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "started_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "completed_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "idempotency": {"$ref": "definitions.schema.json#/$defs/idempotency_binding"},
+    "run_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "extensions": {"$ref": "definitions.schema.json#/$defs/extensions"}
+  },
+  "allOf": [
+    {"if": {"properties": {"lifecycle_state": {"const": "completed"}}}, "then": {"required": ["started_at", "completed_at", "task_quality"], "properties": {"mandatory_artifact_refs": {"minItems": 1}}}}
+  ]
+}

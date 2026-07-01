@@ -1,0 +1,26 @@
+{
+  "schema_version": "1.0",
+  "record_type": "write_receipt",
+  "tenant_id": "018f0000-0000-7000-8000-000000000001",
+  "receipt_id": "018f0000-0000-7000-8000-000000000011",
+  "request_id": "018f0000-0000-7000-8000-000000000012",
+  "source_event_id": "018f0000-0000-7000-8000-000000000006",
+  "resulting_revisions": [
+    {
+      "record_type": "memory_record",
+      "record_id": "018f0000-0000-7000-8000-00000000000b",
+      "record_digest": "sha256:af913ea705935797a753a996a94bbe870c97dbb6b3be40bf22386bcfccbbf973"
+    }
+  ],
+  "evidence_ids": [
+    "018f0000-0000-7000-8000-000000000006"
+  ],
+  "status": "committed",
+  "idempotency": {
+    "tenant_id": "018f0000-0000-7000-8000-000000000001",
+    "idempotency_key": "fixture.operation.0004",
+    "operation_digest": "sha256:67df08bba363258d3a47046f817bfc05dfce9b01b2f508358c136c89a5f96bc4"
+  },
+  "issued_at": "2026-01-01T00:06:00.000Z",
+  "receipt_digest": "sha256:2d5a6efca7a91a6435ad2f0d14a6f54f0679b55c160691b12cdff916bc675848"
+}

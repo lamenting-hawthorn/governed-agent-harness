@@ -1,0 +1,113 @@
+{
+  "schema_version": "1.0",
+  "record_type": "memory_proposal",
+  "tenant_id": "018f0000-0000-7000-8000-000000000001",
+  "proposal_id": "018f0000-0000-7000-8000-00000000000d",
+  "target_scope": {
+    "schema_version": "1.0",
+    "record_type": "memory_scope",
+    "scope_id": "018f0000-0000-7000-8000-000000000005",
+    "tenant_id": "018f0000-0000-7000-8000-000000000001",
+    "actor_id": "018f0000-0000-7000-8000-000000000002",
+    "parent_record_type": "actor_context",
+    "parent_digest": "sha256:eaa0f1c67d60a24074f87d824ec6267bf04ca492ff330844c17ee715e4fa08df",
+    "selection": {
+      "level": "project",
+      "project_id": "018f0000-0000-7000-8000-00000000002e"
+    },
+    "derived_at": "2026-01-01T00:00:02.000Z",
+    "valid_until": "2026-01-01T01:00:00.000Z"
+  },
+  "change_kind": "create",
+  "proposed_record": {
+    "schema_version": "1.0",
+    "record_type": "memory_record",
+    "tenant_id": "018f0000-0000-7000-8000-000000000001",
+    "memory_id": "018f0000-0000-7000-8000-00000000000b",
+    "revision": 1,
+    "proposition": {
+      "kind": "fact",
+      "subject": "fixture subject",
+      "predicate": "has.value",
+      "value": "synthetic"
+    },
+    "entity_ids": [
+      "018f0000-0000-7000-8000-00000000000c"
+    ],
+    "scope": {
+      "schema_version": "1.0",
+      "record_type": "memory_scope",
+      "scope_id": "018f0000-0000-7000-8000-000000000005",
+      "tenant_id": "018f0000-0000-7000-8000-000000000001",
+      "actor_id": "018f0000-0000-7000-8000-000000000002",
+      "parent_record_type": "actor_context",
+      "parent_digest": "sha256:eaa0f1c67d60a24074f87d824ec6267bf04ca492ff330844c17ee715e4fa08df",
+      "selection": {
+        "level": "project",
+        "project_id": "018f0000-0000-7000-8000-00000000002e"
+      },
+      "derived_at": "2026-01-01T00:00:02.000Z",
+      "valid_until": "2026-01-01T01:00:00.000Z"
+    },
+    "visibility": "project",
+    "observed_at": "2026-01-01T00:01:00.000Z",
+    "effective_from": "2026-01-01T00:01:00.000Z",
+    "effective_until": null,
+    "expires_at": "2027-01-01T00:00:00.000Z",
+    "truth_confidence": {
+      "value_millionths": 900000,
+      "basis": "observed",
+      "evidence_ids": [
+        "018f0000-0000-7000-8000-000000000006"
+      ]
+    },
+    "provenance": [
+      {
+        "evidence_id": "018f0000-0000-7000-8000-000000000006",
+        "payload_digest": "sha256:d6b92b4194c2de75a04f26af22e316c6cac6103db955db62e13a8f98a6ded6f7"
+      }
+    ],
+    "sensitivity": "internal",
+    "retention": {
+      "policy_id": "retention.standard.v1",
+      "expires_at": "2028-01-01T00:00:00.000Z",
+      "deletion_mode": "retain_non_sensitive_tombstone"
+    },
+    "lifecycle_state": "candidate",
+    "embedding_space_version": "embedding.v1",
+    "record_digest": "sha256:af913ea705935797a753a996a94bbe870c97dbb6b3be40bf22386bcfccbbf973"
+  },
+  "evidence_spans": [
+    {
+      "evidence_id": "018f0000-0000-7000-8000-000000000006",
+      "payload_digest": "sha256:d6b92b4194c2de75a04f26af22e316c6cac6103db955db62e13a8f98a6ded6f7"
+    }
+  ],
+  "producer": {
+    "producer_id": "learner.v1",
+    "producer_version": "1.0",
+    "run_id": "018f0000-0000-7000-8000-00000000000e"
+  },
+  "truth_confidence": {
+    "value_millionths": 900000,
+    "basis": "observed",
+    "evidence_ids": [
+      "018f0000-0000-7000-8000-000000000006"
+    ]
+  },
+  "task_quality": {
+    "score_millionths": 850000,
+    "metric": "fixture.quality",
+    "evaluator_version": "evaluator.v1"
+  },
+  "compatibility": {
+    "contract_versions": [
+      "memory_proposal=1.0",
+      "memory_record=1.0"
+    ],
+    "runtime_version_range": ">=1.0"
+  },
+  "expires_at": "2027-01-01T00:00:00.000Z",
+  "lifecycle_state": "pending",
+  "proposal_digest": "sha256:7e175e2e3b1f23769eaa505390c1ad9f5822cbf009b23c2a5005fd7fd10a0e34"
+}

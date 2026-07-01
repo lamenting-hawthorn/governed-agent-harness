@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0",
+  "record_type": "policy_decision",
+  "tenant_id": "018f0000-0000-7000-8000-000000000001",
+  "decision_id": "018f0000-0000-7000-8000-000000000016",
+  "request_id": "018f0000-0000-7000-8000-000000000015",
+  "request_digest": "sha256:0ccde7d9ab16035ec7d356a5bf6f49a499d479aad89123cd0b516b1f0995166a",
+  "decision": "require_approval",
+  "rule_refs": [
+    "effects.approval.v1"
+  ],
+  "constraints": [
+    {
+      "constraint_id": "example.org/max_actions",
+      "constraint_version": "1.0",
+      "parameters": {
+        "maximum": 1
+      },
+      "parameters_digest": "sha256:b9ca7ee9ae24922f4b11d19ec79e26030669bc08aa62755c3702a175690dbabe"
+    }
+  ],
+  "isolation_profile": "container",
+  "decided_at": "2026-01-01T00:09:00.000Z",
+  "decision_digest": "sha256:f8df189e1e5e13ae822e7e28fc40f74c6dd06767dbb134318ae7d2e2e40f5c79"
+}

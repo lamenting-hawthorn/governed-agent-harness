@@ -1,0 +1,40 @@
+{
+  "schema_version": "1.0",
+  "record_type": "approval_record",
+  "tenant_id": "018f0000-0000-7000-8000-000000000001",
+  "approval_id": "018f0000-0000-7000-8000-000000000017",
+  "approver_actor_id": "018f0000-0000-7000-8000-000000000018",
+  "approver_context_digest": "sha256:ac5f02c8916afeac905183a1bb7e5005010a40bbcbd17767e29fb4a551002295",
+  "request_id": "018f0000-0000-7000-8000-000000000015",
+  "request_digest": "sha256:0ccde7d9ab16035ec7d356a5bf6f49a499d479aad89123cd0b516b1f0995166a",
+  "policy_decision_id": "018f0000-0000-7000-8000-000000000016",
+  "policy_decision_digest": "sha256:f8df189e1e5e13ae822e7e28fc40f74c6dd06767dbb134318ae7d2e2e40f5c79",
+  "disposition": "approved",
+  "constraints": [
+    {
+      "constraint_id": "example.org/max_actions",
+      "constraint_version": "1.0",
+      "parameters": {
+        "maximum": 1
+      },
+      "parameters_digest": "sha256:b9ca7ee9ae24922f4b11d19ec79e26030669bc08aa62755c3702a175690dbabe"
+    }
+  ],
+  "separation_of_duties": {
+    "required": true,
+    "satisfied": true,
+    "policy_id": "sod.v1"
+  },
+  "issued_at": "2026-01-01T00:10:00.000Z",
+  "expires_at": "2026-01-01T01:00:00.000Z",
+  "approval_digest": "sha256:12bed50694285a872224ca05220a0df245559ca5898a753a0a0a5e933bd283cb",
+  "proof": {
+    "issuer": "policy.authority",
+    "key_id": "policy.key.v1",
+    "algorithm": "fixture-proof-v1",
+    "proof_domain": "approval_record.v1",
+    "object_digest": "sha256:12bed50694285a872224ca05220a0df245559ca5898a753a0a0a5e933bd283cb",
+    "nonce": "NNNNNNNNNNNNNNNNNNNNNN",
+    "detached_proof": "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP"
+  }
+}

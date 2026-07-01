@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0",
+  "record_type": "tool_request",
+  "tenant_id": "018f0000-0000-7000-8000-000000000001",
+  "actor_id": "018f0000-0000-7000-8000-000000000002",
+  "actor_context_digest": "sha256:eaa0f1c67d60a24074f87d824ec6267bf04ca492ff330844c17ee715e4fa08df",
+  "run_id": "018f0000-0000-7000-8000-000000000007",
+  "request_id": "018f0000-0000-7000-8000-000000000015",
+  "tool_id": "fixture.tool",
+  "tool_version": "1.0",
+  "arguments": {
+    "input": "synthetic"
+  },
+  "effect_classes": [
+    "write_external"
+  ],
+  "request_digest": "sha256:0ccde7d9ab16035ec7d356a5bf6f49a499d479aad89123cd0b516b1f0995166a",
+  "idempotency": {
+    "tenant_id": "018f0000-0000-7000-8000-000000000001",
+    "idempotency_key": "fixture.operation.0006",
+    "operation_digest": "sha256:1bf2b8db9ef39fce7294f593717ab709f73229fa97cb35f7b1c34f5b3af4c89d"
+  },
+  "requested_at": "2026-01-01T00:08:00.000Z"
+}

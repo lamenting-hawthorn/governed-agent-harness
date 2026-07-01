@@ -1,0 +1,26 @@
+[
+  {
+    "name": "utf16_property_order",
+    "input": {
+      "😀": 1,
+      "": 2,
+      "a": 3
+    },
+    "canonical": "{\"a\":3,\"😀\":1,\"\":2}"
+  },
+  {
+    "name": "string_escaping",
+    "input": {
+      "text": "line\nquote\"slash\\control\u000f"
+    },
+    "canonical": "{\"text\":\"line\\nquote\\\"slash\\\\control\\u000f\"}"
+  },
+  {
+    "name": "integer_domain",
+    "input": {
+      "max": 9007199254740991,
+      "min": -9007199254740991
+    },
+    "canonical": "{\"max\":9007199254740991,\"min\":-9007199254740991}"
+  }
+]

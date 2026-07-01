@@ -1,0 +1,93 @@
+[
+  {
+    "id": "every_record_missing_tenant",
+    "record_type": "*",
+    "operation": "remove",
+    "path": ["tenant_id"]
+  },
+  {
+    "id": "memory_query_missing_scope",
+    "record_type": "memory_query",
+    "operation": "remove",
+    "path": ["scope"]
+  },
+  {
+    "id": "delivery_missing_target_scope",
+    "record_type": "delivery_envelope",
+    "operation": "remove",
+    "path": ["target_scope"]
+  },
+  {
+    "id": "unsupported_major_version",
+    "record_type": "actor_context",
+    "operation": "set",
+    "path": ["schema_version"],
+    "value": "2.0"
+  },
+  {
+    "id": "undeclared_top_level_security_field",
+    "record_type": "tool_request",
+    "operation": "set",
+    "path": ["trusted_override"],
+    "value": true
+  },
+  {
+    "id": "undeclared_auth_security_field",
+    "record_type": "actor_context",
+    "operation": "set",
+    "path": ["auth", "verified_by_adapter"],
+    "value": true
+  },
+  {
+    "id": "undeclared_proof_security_field",
+    "record_type": "approval_record",
+    "operation": "set",
+    "path": ["proof", "trusted"],
+    "value": true
+  },
+  {
+    "id": "protected_payload_bad_digest",
+    "record_type": "evidence_draft",
+    "operation": "replace_inline_with_protected",
+    "path": ["protected_payload"],
+    "value": {
+      "tenant_id": "018f0000-0000-7000-8000-000000000001",
+      "uri": "blob://tenant/payload",
+      "payload_digest": "sha256:ABC",
+      "size_bytes": 128,
+      "media_type": "application/json",
+      "encryption_key_id": "fixture.key.v1",
+      "retention_until": "2027-01-01T00:00:00.000Z"
+    }
+  },
+  {
+    "id": "protected_payload_relative_uri",
+    "record_type": "evidence_draft",
+    "operation": "replace_inline_with_protected",
+    "path": ["protected_payload"],
+    "value": {
+      "tenant_id": "018f0000-0000-7000-8000-000000000001",
+      "uri": "relative/payload",
+      "payload_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "size_bytes": 128,
+      "media_type": "application/json",
+      "encryption_key_id": "fixture.key.v1",
+      "retention_until": "2027-01-01T00:00:00.000Z"
+    }
+  },
+  {
+    "id": "protected_payload_negative_size",
+    "record_type": "evidence_draft",
+    "operation": "replace_inline_with_protected",
+    "path": ["protected_payload"],
+    "value": {
+      "tenant_id": "018f0000-0000-7000-8000-000000000001",
+      "uri": "blob://tenant/payload",
+      "payload_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "size_bytes": -1,
+      "media_type": "application/json",
+      "encryption_key_id": "fixture.key.v1",
+      "retention_until": "2027-01-01T00:00:00.000Z"
+    }
+  }
+]

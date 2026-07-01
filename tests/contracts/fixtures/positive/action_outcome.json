@@ -1,0 +1,69 @@
+{
+  "schema_version": "1.0",
+  "record_type": "action_outcome",
+  "tenant_id": "018f0000-0000-7000-8000-000000000001",
+  "outcome_id": "018f0000-0000-7000-8000-00000000001b",
+  "target_scope": {
+    "schema_version": "1.0",
+    "record_type": "memory_scope",
+    "scope_id": "018f0000-0000-7000-8000-000000000005",
+    "tenant_id": "018f0000-0000-7000-8000-000000000001",
+    "actor_id": "018f0000-0000-7000-8000-000000000002",
+    "parent_record_type": "actor_context",
+    "parent_digest": "sha256:eaa0f1c67d60a24074f87d824ec6267bf04ca492ff330844c17ee715e4fa08df",
+    "selection": {
+      "level": "project",
+      "project_id": "018f0000-0000-7000-8000-00000000002e"
+    },
+    "derived_at": "2026-01-01T00:00:02.000Z",
+    "valid_until": "2026-01-01T01:00:00.000Z"
+  },
+  "run_id": "018f0000-0000-7000-8000-000000000007",
+  "request_ref": {
+    "record_type": "tool_request",
+    "record_id": "018f0000-0000-7000-8000-000000000015",
+    "record_digest": "sha256:0ccde7d9ab16035ec7d356a5bf6f49a499d479aad89123cd0b516b1f0995166a"
+  },
+  "status": "succeeded",
+  "effect_state": "succeeded",
+  "evidence_refs": [
+    {
+      "record_type": "evidence_envelope",
+      "record_id": "018f0000-0000-7000-8000-000000000008",
+      "record_digest": "sha256:b0ed74d7d98366b73169d55ad68dc9db4fbc626f2e58e6c1b8668bc7fda38a81"
+    }
+  ],
+  "provenance_digest": "sha256:bd393539fe78cc940286f7a551fc5b0592ab1ca40d5361b5619c9e5ea003e2a7",
+  "result_payload": {
+    "result": "synthetic"
+  },
+  "producer_version": "producer.v1",
+  "runtime_version": "runtime.v1",
+  "policy_refs": [
+    {
+      "record_type": "policy_proposal",
+      "record_id": "018f0000-0000-7000-8000-00000000005a",
+      "record_digest": "sha256:0a2e5f05be4f91c4ce301cd0d57ea112eed02bb71bad73c69f34ce3e7ca38f9c"
+    }
+  ],
+  "reviewer_refs": [
+    {
+      "record_type": "approval_record",
+      "record_id": "018f0000-0000-7000-8000-000000000017",
+      "record_digest": "sha256:12bed50694285a872224ca05220a0df245559ca5898a753a0a0a5e933bd283cb"
+    }
+  ],
+  "compatibility": {
+    "contract_versions": [
+      "action_outcome=1.0"
+    ],
+    "runtime_version_range": ">=1.0"
+  },
+  "idempotency": {
+    "tenant_id": "018f0000-0000-7000-8000-000000000001",
+    "idempotency_key": "fixture.operation.0008",
+    "operation_digest": "sha256:90896365e1226be909d657d851f4c0ed92a39f0e72050d72a87a9f536e41195f"
+  },
+  "occurred_at": "2026-01-01T00:13:00.000Z",
+  "outcome_digest": "sha256:96a6a8f8db7ae7146150958b1d114e7d9a53265ee34207395870974aaa004259"
+}

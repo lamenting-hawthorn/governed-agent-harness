@@ -1,0 +1,26 @@
+{
+  "schema_version": "1.0",
+  "record_type": "deletion_receipt",
+  "tenant_id": "018f0000-0000-7000-8000-000000000001",
+  "receipt_id": "018f0000-0000-7000-8000-000000000013",
+  "request_id": "018f0000-0000-7000-8000-000000000014",
+  "mode": "preview",
+  "target_refs": [
+    {
+      "record_type": "memory_record",
+      "record_id": "018f0000-0000-7000-8000-00000000000b",
+      "record_digest": "sha256:af913ea705935797a753a996a94bbe870c97dbb6b3be40bf22386bcfccbbf973"
+    }
+  ],
+  "evidence_ids": [
+    "018f0000-0000-7000-8000-000000000006"
+  ],
+  "status": "previewed",
+  "idempotency": {
+    "tenant_id": "018f0000-0000-7000-8000-000000000001",
+    "idempotency_key": "fixture.operation.0005",
+    "operation_digest": "sha256:eeba8755b40a17e360d231bbeae8f58ff05f218d85a6ed1fcc5ea0c716e60b93"
+  },
+  "issued_at": "2026-01-01T00:07:00.000Z",
+  "receipt_digest": "sha256:620859a0bdb804740eb5971ab155016e05a94c462fc8ba80cee8ecb3562da7b9"
+}

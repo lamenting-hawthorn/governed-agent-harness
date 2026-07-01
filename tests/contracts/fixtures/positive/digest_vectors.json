@@ -1,0 +1,29 @@
+[
+  {
+    "name": "utf16_property_order",
+    "input": {
+      "😀": 1,
+      "": 2,
+      "a": 3
+    },
+    "canonical": "{\"a\":3,\"😀\":1,\"\":2}",
+    "digest": "sha256:a901d5c9340048b768183fd6fb82e7d0f7792049a0aafa9d2c7ccd845d984ad3"
+  },
+  {
+    "name": "string_escaping",
+    "input": {
+      "text": "line\nquote\"slash\\control\u000f"
+    },
+    "canonical": "{\"text\":\"line\\nquote\\\"slash\\\\control\\u000f\"}",
+    "digest": "sha256:5744417dcbd1301b40dcd990a4ccac0e052cac1794fd63c6774e89649c8ae545"
+  },
+  {
+    "name": "integer_domain",
+    "input": {
+      "max": 9007199254740991,
+      "min": -9007199254740991
+    },
+    "canonical": "{\"max\":9007199254740991,\"min\":-9007199254740991}",
+    "digest": "sha256:63546eb60913dcb1cdd5118f7bf4885beed344af930c8a9d5f38fad243fd4819"
+  }
+]
