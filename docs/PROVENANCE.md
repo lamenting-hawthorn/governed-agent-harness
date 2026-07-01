@@ -26,7 +26,8 @@ standalone path resolution, packaging metadata, and isolation assertions.
 - Execution engines, including a future Pi adapter, remain behind versioned
   interfaces and the synchronous governance boundary.
 
-No external source code, private materials, third-party schemas, diagrams,
-assets, proprietary benchmarks, or marketing claims were introduced in Phase
-0. Future third-party code or assets require explicit license and attribution
+Other than the independently written Phase 0 contract snapshot identified
+above, no external source code, private materials, third-party schemas,
+diagrams, assets, proprietary benchmarks, or marketing claims were introduced.
+Future third-party code or assets require explicit license and attribution
 records before acceptance.
