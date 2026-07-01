@@ -69,8 +69,10 @@ Normative words **MUST**, **SHOULD**, and **MAY** follow RFC 2119 usage.
 - **FR-027:** Filesystem, shell, network, external messaging, database mutation,
   credential access, memory writes, skill installation, and runtime policy
   changes MUST be classifiable as effects.
-- **FR-028:** Policy evaluation failure MUST fail closed for effectful requests
-  unless an explicitly configured, auditable policy says otherwise.
+- **FR-028:** If synchronous policy evaluation is unavailable, times out, or
+  fails, every effectful request MUST fail closed. This behavior MUST NOT be
+  configurable. Only non-effectful processing and ancillary telemetry MAY
+  degrade without policy evaluation.
 
 ### Evidence and run inspection
 
@@ -231,5 +233,4 @@ The first usable release must demonstrate:
 9. Pass unit, integration, end-to-end, negative, and adversarial tests for that
    path.
 
-Detailed sequencing is expected in `docs/IMPLEMENTATION_PLAN.md`; threat and
-abuse cases are expected in `docs/SECURITY_MODEL.md`.
+Threat and abuse cases are expected in `docs/SECURITY_MODEL.md`.

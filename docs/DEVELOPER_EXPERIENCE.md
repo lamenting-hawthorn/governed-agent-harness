@@ -108,7 +108,9 @@ operation model should remain stable.
 - Validates and explains a policy without executing effects.
 - Supports a dry-run decision against a recorded or synthetic request.
 - Shows the loaded version and configuration source.
-- Makes permissive rules and fail-open behavior visibly exceptional.
+- Makes permissive rules visible while refusing any configuration that would
+  allow an effect to fail open when synchronous policy evaluation is
+  unavailable.
 
 ### `gah skills` and `gah adapters`
 
@@ -179,7 +181,7 @@ An adapter or provider author should be able to:
 7. Install it into an isolated test profile and inspect activation decisions.
 
 Expected technical contracts are documented in `docs/ARCHITECTURE.md`, while
-testing requirements are expected in `docs/TESTING_AND_EVALUATION.md`.
+testing requirements are expected in `docs/TESTING_STRATEGY.md`.
 
 ## Local-to-hosted transition
 

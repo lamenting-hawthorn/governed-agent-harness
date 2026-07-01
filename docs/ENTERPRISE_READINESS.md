@@ -62,7 +62,8 @@ Caller-provided tenant identifiers are never sufficient proof of membership.
 - Break-glass access is time-bound, strongly authenticated, narrowly scoped,
   alerted, and fully audited.
 - Runtime behavior on policy-service timeout or partition is deterministic and
-  defaults to no unapproved effect.
+  fails closed for every effect. This behavior is not configurable; only
+  non-effectful processing and ancillary telemetry may degrade.
 
 ### Secrets and external systems
 
@@ -138,7 +139,7 @@ evidence such as:
 | Audit completeness | Causal trace tests across decision, effect, failure, and retry paths |
 
 The detailed threat model is expected in `docs/SECURITY_MODEL.md`; evaluation
-methodology is expected in `docs/TESTING_AND_EVALUATION.md`.
+methodology is expected in `docs/TESTING_STRATEGY.md`.
 
 ## Enterprise capability phases
 

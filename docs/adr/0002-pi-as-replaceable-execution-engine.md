@@ -32,8 +32,8 @@ The boundary must support at least:
 
 The governance kernel owns tool registration, policy decisions, approvals,
 dispatch, evidence, and memory promotion. The Pi adapter MUST NOT execute an
-effect around the governed dispatcher. Kernel and contract packages MUST NOT
-import Pi modules or expose Pi-specific types.
+effect outside or in bypass of the governed dispatcher. Kernel and contract
+packages MUST NOT import Pi modules or expose Pi-specific types.
 
 ## Conformance
 
