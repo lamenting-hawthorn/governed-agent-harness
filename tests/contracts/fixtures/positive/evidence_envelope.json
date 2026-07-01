@@ -1,0 +1,39 @@
+{
+  "schema_version": "1.0",
+  "record_type": "evidence_envelope",
+  "tenant_id": "018f0000-0000-7000-8000-000000000001",
+  "envelope_id": "018f0000-0000-7000-8000-000000000008",
+  "draft": {
+    "schema_version": "1.0",
+    "record_type": "evidence_draft",
+    "tenant_id": "018f0000-0000-7000-8000-000000000001",
+    "event_id": "018f0000-0000-7000-8000-000000000006",
+    "run_id": "018f0000-0000-7000-8000-000000000007",
+    "event_kind": "fixture.observed",
+    "occurred_at": "2026-01-01T00:01:00.000Z",
+    "idempotency": {
+      "tenant_id": "018f0000-0000-7000-8000-000000000001",
+      "idempotency_key": "fixture.operation.0001",
+      "operation_digest": "sha256:7e21ea4a038c2bd7d3ecf7cfd82e3fae06712d4a648d276351ad52265f366586"
+    },
+    "classification": "internal",
+    "redaction_status": "redacted",
+    "inline_payload": {
+      "message": "synthetic fixture"
+    }
+  },
+  "draft_digest": "sha256:c39d0b9327fe69f80afe0a8493945988834218657ba9d60e1922c42dede7722a",
+  "recorded_at": "2026-01-01T00:02:00.000Z",
+  "sequence_number": 1,
+  "payload_digest": "sha256:33054f6b449b94ad0e53f1907313141b1c3b3de8434935de9002b6ef3583a5e1",
+  "prior_event_digest": null,
+  "event_digest": "sha256:b0ed74d7d98366b73169d55ad68dc9db4fbc626f2e58e6c1b8668bc7fda38a81",
+  "policy_refs": [
+    {
+      "record_type": "policy_proposal",
+      "record_id": "018f0000-0000-7000-8000-00000000005a",
+      "record_digest": "sha256:0a2e5f05be4f91c4ce301cd0d57ea112eed02bb71bad73c69f34ce3e7ca38f9c"
+    }
+  ],
+  "storage_writer_id": "evidence.writer.v1"
+}

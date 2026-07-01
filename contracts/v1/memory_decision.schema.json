@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-governance:contracts:v1:memory_decision",
+  "title": "MemoryDecision v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_type", "tenant_id", "decision_id", "proposal_ref", "disposition", "policy_refs", "rule_refs", "constraints", "reason_code", "actor_context_digest", "decided_at", "decision_digest"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "record_type": {"const": "memory_decision"},
+    "tenant_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "decision_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "proposal_ref": {"$ref": "definitions.schema.json#/$defs/record_ref"},
+    "disposition": {"enum": ["accept", "reject", "review", "quarantine"]},
+    "policy_refs": {"type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "rule_refs": {"type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": {"$ref": "definitions.schema.json#/$defs/short_identifier"}},
+    "constraints": {"$ref": "definitions.schema.json#/$defs/constraint_set"},
+    "reason_code": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+    "reason": {"type": "string", "maxLength": 2048},
+    "actor_context_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "decided_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "decision_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "extensions": {"$ref": "definitions.schema.json#/$defs/extensions"}
+  }
+}

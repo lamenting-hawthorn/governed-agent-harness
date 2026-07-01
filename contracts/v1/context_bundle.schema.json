@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-governance:contracts:v1:context_bundle",
+  "title": "ContextBundle v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_type", "tenant_id", "bundle_id", "query_id", "scope_digest", "records", "retrieval_profile", "timeout_state", "degradation_state", "generated_at", "bundle_digest"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "record_type": {"const": "context_bundle"},
+    "tenant_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "bundle_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "query_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "scope_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "records": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["memory_id", "revision", "memory_type", "citation", "component_scores"],
+        "properties": {
+          "memory_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+          "revision": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+          "memory_type": {"enum": ["fact", "preference", "episode", "procedure", "correction", "temporal", "relationship"]},
+          "citation": {"$ref": "definitions.schema.json#/$defs/evidence_span"},
+          "component_scores": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["relevance", "recency", "confidence"],
+            "properties": {
+              "relevance": {"$ref": "definitions.schema.json#/$defs/ratio_millionths"},
+              "recency": {"$ref": "definitions.schema.json#/$defs/ratio_millionths"},
+              "confidence": {"$ref": "definitions.schema.json#/$defs/ratio_millionths"}
+            }
+          }
+        }
+      }
+    },
+    "retrieval_profile": {"enum": ["fast", "accurate"]},
+    "timeout_state": {"enum": ["within_budget", "timed_out"]},
+    "degradation_state": {"enum": ["none", "no_memory", "partial", "timeout", "policy_filtered"]},
+    "generated_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "bundle_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "extensions": {"$ref": "definitions.schema.json#/$defs/extensions"}
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "schema_version": "1.0",
+  "contracts": [
+    {"record_type": "actor_context", "schema": "actor_context.schema.json"},
+    {"record_type": "memory_scope", "schema": "memory_scope.schema.json"},
+    {"record_type": "evidence_draft", "schema": "evidence_draft.schema.json"},
+    {"record_type": "evidence_envelope", "schema": "evidence_envelope.schema.json"},
+    {"record_type": "learning_trace_envelope", "schema": "learning_trace_envelope.schema.json"},
+    {"record_type": "memory_query", "schema": "memory_query.schema.json"},
+    {"record_type": "memory_record", "schema": "memory_record.schema.json"},
+    {"record_type": "memory_proposal", "schema": "memory_proposal.schema.json"},
+    {"record_type": "memory_decision", "schema": "memory_decision.schema.json"},
+    {"record_type": "context_bundle", "schema": "context_bundle.schema.json"},
+    {"record_type": "write_receipt", "schema": "write_receipt.schema.json"},
+    {"record_type": "deletion_receipt", "schema": "deletion_receipt.schema.json"},
+    {"record_type": "tool_request", "schema": "tool_request.schema.json"},
+    {"record_type": "policy_decision", "schema": "policy_decision.schema.json"},
+    {"record_type": "approval_record", "schema": "approval_record.schema.json"},
+    {"record_type": "authorization_grant", "schema": "authorization_grant.schema.json"},
+    {"record_type": "capability_manifest", "schema": "capability_manifest.schema.json"},
+    {"record_type": "action_outcome", "schema": "action_outcome.schema.json"},
+    {"record_type": "feedback_event", "schema": "feedback_event.schema.json"},
+    {"record_type": "evaluation_run", "schema": "evaluation_run.schema.json"},
+    {"record_type": "dataset_version", "schema": "dataset_version.schema.json"},
+    {"record_type": "skill_proposal", "schema": "skill_proposal.schema.json"},
+    {"record_type": "policy_proposal", "schema": "policy_proposal.schema.json"},
+    {"record_type": "gate_decision", "schema": "gate_decision.schema.json"},
+    {"record_type": "delivery_envelope", "schema": "delivery_envelope.schema.json"},
+    {"record_type": "activation_receipt", "schema": "activation_receipt.schema.json"},
+    {"record_type": "rollback_receipt", "schema": "rollback_receipt.schema.json"}
+  ]
+}

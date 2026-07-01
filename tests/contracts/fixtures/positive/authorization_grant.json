@@ -1,0 +1,49 @@
+{
+  "schema_version": "1.0",
+  "record_type": "authorization_grant",
+  "tenant_id": "018f0000-0000-7000-8000-000000000001",
+  "grant_id": "018f0000-0000-7000-8000-000000000019",
+  "actor_id": "018f0000-0000-7000-8000-000000000002",
+  "run_id": "018f0000-0000-7000-8000-000000000007",
+  "request_id": "018f0000-0000-7000-8000-000000000015",
+  "request_digest": "sha256:0ccde7d9ab16035ec7d356a5bf6f49a499d479aad89123cd0b516b1f0995166a",
+  "tool_id": "fixture.tool",
+  "tool_version": "1.0",
+  "policy_decision_id": "018f0000-0000-7000-8000-000000000016",
+  "policy_decision_digest": "sha256:f8df189e1e5e13ae822e7e28fc40f74c6dd06767dbb134318ae7d2e2e40f5c79",
+  "approval_refs": [
+    {
+      "record_type": "approval_record",
+      "record_id": "018f0000-0000-7000-8000-000000000017",
+      "record_digest": "sha256:12bed50694285a872224ca05220a0df245559ca5898a753a0a0a5e933bd283cb"
+    }
+  ],
+  "constraints": [
+    {
+      "constraint_id": "example.org/max_actions",
+      "constraint_version": "1.0",
+      "parameters": {
+        "maximum": 1
+      },
+      "parameters_digest": "sha256:b9ca7ee9ae24922f4b11d19ec79e26030669bc08aa62755c3702a175690dbabe"
+    }
+  ],
+  "isolation_profile": "container",
+  "issued_at": "2026-01-01T00:11:00.000Z",
+  "expires_at": "2026-01-01T00:16:00.000Z",
+  "grant_nonce": "GGGGGGGGGGGGGGGGGGGGGG",
+  "idempotency": {
+    "tenant_id": "018f0000-0000-7000-8000-000000000001",
+    "idempotency_key": "fixture.operation.0007",
+    "operation_digest": "sha256:c1d902b759fba7a929957137dd6d589223d6f2726e06a81a4f63aa5ef13042b7"
+  },
+  "proof": {
+    "issuer": "policy.authority",
+    "key_id": "policy.key.v1",
+    "algorithm": "fixture-proof-v1",
+    "proof_domain": "authorization_grant.v1",
+    "object_digest": "sha256:fc20a81b786735274589211f9cc5a8d834fe92aeb77264c16a0e42ea4969989d",
+    "nonce": "NNNNNNNNNNNNNNNNNNNNNN",
+    "detached_proof": "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP"
+  }
+}

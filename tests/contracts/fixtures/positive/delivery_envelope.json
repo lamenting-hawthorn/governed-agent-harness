@@ -1,0 +1,83 @@
+{
+  "schema_version": "1.0",
+  "record_type": "delivery_envelope",
+  "tenant_id": "018f0000-0000-7000-8000-000000000001",
+  "delivery_id": "018f0000-0000-7000-8000-000000000027",
+  "target_scope": {
+    "schema_version": "1.0",
+    "record_type": "memory_scope",
+    "scope_id": "018f0000-0000-7000-8000-000000000005",
+    "tenant_id": "018f0000-0000-7000-8000-000000000001",
+    "actor_id": "018f0000-0000-7000-8000-000000000002",
+    "parent_record_type": "actor_context",
+    "parent_digest": "sha256:eaa0f1c67d60a24074f87d824ec6267bf04ca492ff330844c17ee715e4fa08df",
+    "selection": {
+      "level": "project",
+      "project_id": "018f0000-0000-7000-8000-00000000002e"
+    },
+    "derived_at": "2026-01-01T00:00:02.000Z",
+    "valid_until": "2026-01-01T01:00:00.000Z"
+  },
+  "artifact_type": "skill",
+  "artifact_id": "018f0000-0000-7000-8000-000000000023",
+  "artifact_revision": 1,
+  "artifact_digest": "sha256:be4c49fbd64577c93908f9c49d3a4625e52c216bac4703be737fc2e080f4c9a7",
+  "gate_decision_ref": {
+    "record_type": "gate_decision",
+    "record_id": "018f0000-0000-7000-8000-000000000026",
+    "record_digest": "sha256:6bc018680ebd7d1b1c409d2cebff385555a5f789f32d980188f9616f4fecc97b"
+  },
+  "evidence_refs": [
+    {
+      "record_type": "evidence_envelope",
+      "record_id": "018f0000-0000-7000-8000-000000000008",
+      "record_digest": "sha256:b0ed74d7d98366b73169d55ad68dc9db4fbc626f2e58e6c1b8668bc7fda38a81"
+    }
+  ],
+  "provenance_digest": "sha256:00925943a0ad334915b011946e782ce2106787b5b2429ac8d752ef06f735c220",
+  "producer_version": "producer.v1",
+  "runtime_version": "runtime.v1",
+  "policy_refs": [
+    {
+      "record_type": "policy_proposal",
+      "record_id": "018f0000-0000-7000-8000-00000000005a",
+      "record_digest": "sha256:0a2e5f05be4f91c4ce301cd0d57ea112eed02bb71bad73c69f34ce3e7ca38f9c"
+    }
+  ],
+  "reviewer_refs": [
+    {
+      "record_type": "approval_record",
+      "record_id": "018f0000-0000-7000-8000-000000000017",
+      "record_digest": "sha256:12bed50694285a872224ca05220a0df245559ca5898a753a0a0a5e933bd283cb"
+    }
+  ],
+  "compatibility": {
+    "contract_versions": [
+      "delivery_envelope=1.0",
+      "skill_proposal=1.0"
+    ],
+    "runtime_version_range": ">=1.0"
+  },
+  "rollback_metadata": {
+    "strategy": "deactivate_revision",
+    "previous_active_ref": null
+  },
+  "lifecycle_state": "delivered",
+  "idempotency": {
+    "tenant_id": "018f0000-0000-7000-8000-000000000001",
+    "idempotency_key": "fixture.operation.0011",
+    "operation_digest": "sha256:4d21a5c3091db3645d5246f9881f47fbc6dd157de1dcb907be18a0176c5d4c79"
+  },
+  "issued_at": "2026-01-01T00:23:00.000Z",
+  "expires_at": "2026-01-02T00:23:00.000Z",
+  "envelope_digest": "sha256:758d9ae1f5be8bf1bdf0b8142c28b96993da550e3edf0c80ff2b48945dce7d67",
+  "proof": {
+    "issuer": "learning.authority",
+    "key_id": "learning.key.v1",
+    "algorithm": "fixture-proof-v1",
+    "proof_domain": "delivery_envelope.v1",
+    "object_digest": "sha256:758d9ae1f5be8bf1bdf0b8142c28b96993da550e3edf0c80ff2b48945dce7d67",
+    "nonce": "NNNNNNNNNNNNNNNNNNNNNN",
+    "detached_proof": "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP"
+  }
+}

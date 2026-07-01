@@ -1,0 +1,83 @@
+{
+  "schema_version": "1.0",
+  "record_type": "activation_receipt",
+  "tenant_id": "018f0000-0000-7000-8000-000000000001",
+  "receipt_id": "018f0000-0000-7000-8000-000000000028",
+  "issuer_role": "runtime_authority",
+  "target_scope": {
+    "schema_version": "1.0",
+    "record_type": "memory_scope",
+    "scope_id": "018f0000-0000-7000-8000-000000000005",
+    "tenant_id": "018f0000-0000-7000-8000-000000000001",
+    "actor_id": "018f0000-0000-7000-8000-000000000002",
+    "parent_record_type": "actor_context",
+    "parent_digest": "sha256:eaa0f1c67d60a24074f87d824ec6267bf04ca492ff330844c17ee715e4fa08df",
+    "selection": {
+      "level": "project",
+      "project_id": "018f0000-0000-7000-8000-00000000002e"
+    },
+    "derived_at": "2026-01-01T00:00:02.000Z",
+    "valid_until": "2026-01-01T01:00:00.000Z"
+  },
+  "delivery_id": "018f0000-0000-7000-8000-000000000027",
+  "delivery_digest": "sha256:758d9ae1f5be8bf1bdf0b8142c28b96993da550e3edf0c80ff2b48945dce7d67",
+  "artifact_type": "skill",
+  "artifact_id": "018f0000-0000-7000-8000-000000000023",
+  "artifact_revision": 1,
+  "artifact_digest": "sha256:be4c49fbd64577c93908f9c49d3a4625e52c216bac4703be737fc2e080f4c9a7",
+  "activated_revision": {
+    "record_type": "skill_proposal",
+    "record_id": "018f0000-0000-7000-8000-000000000023",
+    "record_digest": "sha256:be4c49fbd64577c93908f9c49d3a4625e52c216bac4703be737fc2e080f4c9a7"
+  },
+  "previous_active_ref": null,
+  "evidence_refs": [
+    {
+      "record_type": "evidence_envelope",
+      "record_id": "018f0000-0000-7000-8000-000000000008",
+      "record_digest": "sha256:b0ed74d7d98366b73169d55ad68dc9db4fbc626f2e58e6c1b8668bc7fda38a81"
+    }
+  ],
+  "provenance_digest": "sha256:a5d36f76b56fe5b5b2a06888c92e78b21cbfd9aa48a139f4407427cec966ec03",
+  "producer_version": "runtime.authority.v1",
+  "runtime_version": "runtime.v1",
+  "status": "activated",
+  "policy_refs": [
+    {
+      "record_type": "policy_proposal",
+      "record_id": "018f0000-0000-7000-8000-00000000005a",
+      "record_digest": "sha256:0a2e5f05be4f91c4ce301cd0d57ea112eed02bb71bad73c69f34ce3e7ca38f9c"
+    }
+  ],
+  "reviewer_refs": [
+    {
+      "record_type": "approval_record",
+      "record_id": "018f0000-0000-7000-8000-000000000017",
+      "record_digest": "sha256:12bed50694285a872224ca05220a0df245559ca5898a753a0a0a5e933bd283cb"
+    }
+  ],
+  "compatibility": {
+    "contract_versions": [
+      "activation_receipt=1.0",
+      "delivery_envelope=1.0"
+    ],
+    "runtime_version_range": ">=1.0"
+  },
+  "idempotency": {
+    "tenant_id": "018f0000-0000-7000-8000-000000000001",
+    "idempotency_key": "fixture.operation.0012",
+    "operation_digest": "sha256:e3e9b68ebfd37dbeb0132c946ab4bf8644ba5dd1e1abd993184e99fe2d92d5be"
+  },
+  "issued_at": "2026-01-01T00:24:00.000Z",
+  "expires_at": "2026-01-02T00:24:00.000Z",
+  "receipt_digest": "sha256:f46f765a41d1a43f00141084f3b50d3b478fb0961f274d2fc750c5e2858a2980",
+  "proof": {
+    "issuer": "runtime.authority",
+    "key_id": "runtime.key.v1",
+    "algorithm": "fixture-proof-v1",
+    "proof_domain": "activation_receipt.v1",
+    "object_digest": "sha256:f46f765a41d1a43f00141084f3b50d3b478fb0961f274d2fc750c5e2858a2980",
+    "nonce": "NNNNNNNNNNNNNNNNNNNNNN",
+    "detached_proof": "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP"
+  }
+}

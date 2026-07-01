@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-governance:contracts:v1:approval_record",
+  "title": "ApprovalRecord v1",
+  "description": "Audit evidence for an approval disposition; this record is not executable permission.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_type", "tenant_id", "approval_id", "approver_actor_id", "approver_context_digest", "request_id", "request_digest", "policy_decision_id", "policy_decision_digest", "disposition", "constraints", "separation_of_duties", "issued_at", "expires_at", "approval_digest", "proof"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "record_type": {"const": "approval_record"},
+    "tenant_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "approval_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "approver_actor_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "approver_context_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "request_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "request_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "policy_decision_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "policy_decision_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "disposition": {"enum": ["approved", "rejected", "revoked"]},
+    "constraints": {"$ref": "definitions.schema.json#/$defs/constraint_set"},
+    "separation_of_duties": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required", "satisfied", "policy_id"],
+      "properties": {
+        "required": {"type": "boolean"},
+        "satisfied": {"type": "boolean"},
+        "policy_id": {"$ref": "definitions.schema.json#/$defs/short_identifier"}
+      }
+    },
+    "issued_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "expires_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "revoked_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "approval_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "proof": {
+      "allOf": [
+        {"$ref": "definitions.schema.json#/$defs/integrity_proof"},
+        {"properties": {"proof_domain": {"const": "approval_record.v1"}}}
+      ]
+    },
+    "extensions": {"$ref": "definitions.schema.json#/$defs/extensions"}
+  },
+  "allOf": [
+    {"if": {"properties": {"disposition": {"const": "revoked"}}}, "then": {"required": ["revoked_at"]}, "else": {"not": {"required": ["revoked_at"]}}}
+  ]
+}

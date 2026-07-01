@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "record_type": "evidence_draft",
+  "tenant_id": "018f0000-0000-7000-8000-000000000001",
+  "event_id": "018f0000-0000-7000-8000-000000000006",
+  "run_id": "018f0000-0000-7000-8000-000000000007",
+  "event_kind": "fixture.observed",
+  "occurred_at": "2026-01-01T00:01:00.000Z",
+  "idempotency": {
+    "tenant_id": "018f0000-0000-7000-8000-000000000001",
+    "idempotency_key": "fixture.operation.0001",
+    "operation_digest": "sha256:7e21ea4a038c2bd7d3ecf7cfd82e3fae06712d4a648d276351ad52265f366586"
+  },
+  "classification": "internal",
+  "redaction_status": "redacted",
+  "inline_payload": {
+    "message": "synthetic fixture"
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "schema_version": "1.0",
+  "record_type": "learning_trace_envelope",
+  "tenant_id": "018f0000-0000-7000-8000-000000000001",
+  "trace_id": "018f0000-0000-7000-8000-000000000009",
+  "run_id": "018f0000-0000-7000-8000-000000000007",
+  "scope": {
+    "schema_version": "1.0",
+    "record_type": "memory_scope",
+    "scope_id": "018f0000-0000-7000-8000-000000000005",
+    "tenant_id": "018f0000-0000-7000-8000-000000000001",
+    "actor_id": "018f0000-0000-7000-8000-000000000002",
+    "parent_record_type": "actor_context",
+    "parent_digest": "sha256:eaa0f1c67d60a24074f87d824ec6267bf04ca492ff330844c17ee715e4fa08df",
+    "selection": {
+      "level": "project",
+      "project_id": "018f0000-0000-7000-8000-00000000002e"
+    },
+    "derived_at": "2026-01-01T00:00:02.000Z",
+    "valid_until": "2026-01-01T01:00:00.000Z"
+  },
+  "completion_state": "completed",
+  "evidence_refs": [
+    {
+      "record_type": "evidence_envelope",
+      "record_id": "018f0000-0000-7000-8000-000000000008",
+      "record_digest": "sha256:b0ed74d7d98366b73169d55ad68dc9db4fbc626f2e58e6c1b8668bc7fda38a81"
+    }
+  ],
+  "tool_evidence_refs": [],
+  "versions": {
+    "runtime": "runtime.v1",
+    "adapter": "adapter.v1",
+    "contract_set": "1.0"
+  },
+  "source_digest": "sha256:cff9c9f92f8716c35569c109f285b359b632053d1bc08f02c87200067127a8c4",
+  "normalized_digest": "sha256:9c26cb1c7c5dddcdbf40de5eb5de45774dc11c56b4d16cd78d606c7d03c50423",
+  "redaction": {
+    "policy_id": "redaction.v1",
+    "status": "redacted"
+  },
+  "retention": {
+    "policy_id": "retention.standard.v1",
+    "expires_at": "2028-01-01T00:00:00.000Z",
+    "deletion_mode": "retain_non_sensitive_tombstone"
+  },
+  "exported_at": "2026-01-01T00:03:00.000Z",
+  "export_digest": "sha256:dbeecf3b1a995b908d21f3eb8c7b9a01790b20d94da0925cd54edf2751dfb41f",
+  "idempotency": {
+    "tenant_id": "018f0000-0000-7000-8000-000000000001",
+    "idempotency_key": "fixture.operation.0002",
+    "operation_digest": "sha256:b43c186d577e41fc49209738e9d9dbabd440887c3f9f2092df30ddce4845b772"
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "schema_version": "1.0",
+  "record_type": "policy_proposal",
+  "tenant_id": "018f0000-0000-7000-8000-000000000001",
+  "proposal_id": "018f0000-0000-7000-8000-000000000024",
+  "artifact_id": "018f0000-0000-7000-8000-000000000025",
+  "artifact_revision": 1,
+  "target_scope": {
+    "schema_version": "1.0",
+    "record_type": "memory_scope",
+    "scope_id": "018f0000-0000-7000-8000-000000000005",
+    "tenant_id": "018f0000-0000-7000-8000-000000000001",
+    "actor_id": "018f0000-0000-7000-8000-000000000002",
+    "parent_record_type": "actor_context",
+    "parent_digest": "sha256:eaa0f1c67d60a24074f87d824ec6267bf04ca492ff330844c17ee715e4fa08df",
+    "selection": {
+      "level": "project",
+      "project_id": "018f0000-0000-7000-8000-00000000002e"
+    },
+    "derived_at": "2026-01-01T00:00:02.000Z",
+    "valid_until": "2026-01-01T01:00:00.000Z"
+  },
+  "policy_domain": "evaluation",
+  "artifact": {
+    "rule": "synthetic"
+  },
+  "evidence_refs": [
+    {
+      "record_type": "evidence_envelope",
+      "record_id": "018f0000-0000-7000-8000-000000000008",
+      "record_digest": "sha256:b0ed74d7d98366b73169d55ad68dc9db4fbc626f2e58e6c1b8668bc7fda38a81"
+    }
+  ],
+  "provenance_digest": "sha256:aba71b68e484b7b03437ba9fa6ab6d0145d3d73f32c5663fbb97ec1c4cfc60f8",
+  "producer_version": "producer.v1",
+  "runtime_version": "runtime.v1",
+  "policy_refs": [
+    {
+      "record_type": "policy_proposal",
+      "record_id": "018f0000-0000-7000-8000-00000000005a",
+      "record_digest": "sha256:0a2e5f05be4f91c4ce301cd0d57ea112eed02bb71bad73c69f34ce3e7ca38f9c"
+    }
+  ],
+  "reviewer_refs": [
+    {
+      "record_type": "approval_record",
+      "record_id": "018f0000-0000-7000-8000-000000000017",
+      "record_digest": "sha256:12bed50694285a872224ca05220a0df245559ca5898a753a0a0a5e933bd283cb"
+    }
+  ],
+  "compatibility": {
+    "contract_versions": [
+      "policy_proposal=1.0"
+    ],
+    "runtime_version_range": ">=1.0"
+  },
+  "created_at": "2026-01-01T00:21:00.000Z",
+  "expires_at": "2027-01-01T00:00:00.000Z",
+  "lifecycle_state": "approved",
+  "proposal_digest": "sha256:e42b2b6e5699f3bc962cf649f44ef338d4a188c83a0b5529a930e790a32a73a4"
+}
