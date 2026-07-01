@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-governance:contracts:v1:policy_decision",
+  "title": "PolicyDecision v1",
+  "description": "Audit evidence for a policy result; this record is not executable permission.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_type", "tenant_id", "decision_id", "request_id", "request_digest", "decision", "rule_refs", "constraints", "isolation_profile", "decided_at", "decision_digest"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "record_type": {"const": "policy_decision"},
+    "tenant_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "decision_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "request_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "request_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "decision": {"enum": ["authorize", "deny", "transform", "require_approval"]},
+    "transformed_request_ref": {"$ref": "definitions.schema.json#/$defs/record_ref"},
+    "rule_refs": {"type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": {"$ref": "definitions.schema.json#/$defs/short_identifier"}},
+    "constraints": {"$ref": "definitions.schema.json#/$defs/constraint_set"},
+    "isolation_profile": {"enum": ["none", "process", "container", "microvm", "network_restricted", "no_effect"]},
+    "decided_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "decision_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "extensions": {"$ref": "definitions.schema.json#/$defs/extensions"}
+  },
+  "allOf": [
+    {"if": {"properties": {"decision": {"const": "transform"}}}, "then": {"required": ["transformed_request_ref"]}, "else": {"not": {"required": ["transformed_request_ref"]}}}
+  ]
+}

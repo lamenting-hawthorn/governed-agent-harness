@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-governance:contracts:v1:action_outcome",
+  "title": "ActionOutcome v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_type", "tenant_id", "outcome_id", "target_scope", "run_id", "request_ref", "status", "effect_state", "evidence_refs", "provenance_digest", "producer_version", "runtime_version", "policy_refs", "reviewer_refs", "compatibility", "idempotency", "occurred_at", "outcome_digest"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "record_type": {"const": "action_outcome"},
+    "tenant_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "outcome_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "target_scope": {"$ref": "memory_scope.schema.json"},
+    "run_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "request_ref": {"$ref": "definitions.schema.json#/$defs/record_ref"},
+    "status": {"enum": ["succeeded", "failed", "indeterminate", "cancelled"]},
+    "effect_state": {"enum": ["proposed", "decided", "approved", "grant_issued", "prepared", "dispatched", "succeeded", "failed", "indeterminate"]},
+    "evidence_refs": {"type": "array", "minItems": 1, "maxItems": 256, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "provenance_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "result_payload": {"$ref": "definitions.schema.json#/$defs/json_value"},
+    "protected_result": {"$ref": "definitions.schema.json#/$defs/protected_payload_ref"},
+    "producer_version": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+    "runtime_version": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+    "policy_refs": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "reviewer_refs": {"type": "array", "maxItems": 64, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "compatibility": {"$ref": "definitions.schema.json#/$defs/compatibility"},
+    "idempotency": {"$ref": "definitions.schema.json#/$defs/idempotency_binding"},
+    "occurred_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "outcome_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "extensions": {"$ref": "definitions.schema.json#/$defs/extensions"}
+  },
+  "allOf": [
+    {
+      "oneOf": [
+        {
+          "properties": {
+            "status": {"const": "succeeded"},
+            "effect_state": {"const": "succeeded"}
+          }
+        },
+        {
+          "properties": {
+            "status": {"const": "failed"},
+            "effect_state": {"const": "failed"}
+          }
+        },
+        {
+          "properties": {
+            "status": {"const": "indeterminate"},
+            "effect_state": {"const": "indeterminate"}
+          }
+        },
+        {
+          "properties": {
+            "status": {"const": "cancelled"},
+            "effect_state": {"enum": ["proposed", "decided", "approved", "grant_issued", "prepared"]}
+          }
+        }
+      ]
+    }
+  ],
+  "not": {"required": ["result_payload", "protected_result"]}
+}

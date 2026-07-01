@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-governance:contracts:v1:feedback_event",
+  "title": "FeedbackEvent v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_type", "tenant_id", "feedback_id", "target_scope", "outcome_ref", "source", "feedback_type", "feedback", "evidence_refs", "provenance_digest", "classification", "redaction_status", "consent_policy_id", "producer_version", "runtime_version", "policy_refs", "reviewer_refs", "compatibility", "idempotency", "occurred_at", "feedback_digest"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "record_type": {"const": "feedback_event"},
+    "tenant_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "feedback_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "target_scope": {"$ref": "memory_scope.schema.json"},
+    "outcome_ref": {"$ref": "definitions.schema.json#/$defs/record_ref"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_type", "source_id"],
+      "properties": {
+        "source_type": {"enum": ["actor", "reviewer", "system_evaluator", "external_signal"]},
+        "source_id": {"$ref": "definitions.schema.json#/$defs/short_identifier"}
+      }
+    },
+    "feedback_type": {"enum": ["rating", "correction", "preference", "safety", "policy", "freeform"]},
+    "feedback": {"$ref": "definitions.schema.json#/$defs/json_value"},
+    "evidence_refs": {"type": "array", "minItems": 1, "maxItems": 256, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "provenance_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "classification": {"enum": ["public", "internal", "confidential", "restricted"]},
+    "redaction_status": {"const": "redacted"},
+    "consent_policy_id": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+    "producer_version": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+    "runtime_version": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+    "policy_refs": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "reviewer_refs": {"type": "array", "maxItems": 64, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "compatibility": {"$ref": "definitions.schema.json#/$defs/compatibility"},
+    "idempotency": {"$ref": "definitions.schema.json#/$defs/idempotency_binding"},
+    "occurred_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "feedback_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "extensions": {"$ref": "definitions.schema.json#/$defs/extensions"}
+  }
+}

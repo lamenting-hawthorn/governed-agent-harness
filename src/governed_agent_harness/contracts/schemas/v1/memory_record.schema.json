@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-governance:contracts:v1:memory_record",
+  "title": "MemoryRecord v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_type", "tenant_id", "memory_id", "revision", "proposition", "entity_ids", "scope", "visibility", "observed_at", "effective_from", "truth_confidence", "provenance", "sensitivity", "retention", "lifecycle_state", "embedding_space_version", "record_digest"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "record_type": {"const": "memory_record"},
+    "tenant_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "memory_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "revision": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+    "proposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "subject", "predicate", "value"],
+      "properties": {
+        "kind": {"enum": ["fact", "preference", "episode", "procedure", "correction", "temporal", "relationship"]},
+        "subject": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "predicate": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+        "value": {"$ref": "definitions.schema.json#/$defs/json_value"}
+      }
+    },
+    "entity_ids": {"type": "array", "maxItems": 128, "uniqueItems": true, "items": {"$ref": "definitions.schema.json#/$defs/uuid_v7"}},
+    "scope": {"$ref": "memory_scope.schema.json"},
+    "visibility": {"enum": ["actor", "user", "session", "workspace", "project", "team", "organization", "public"]},
+    "observed_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "effective_from": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "effective_until": {"oneOf": [{"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"}, {"type": "null"}]},
+    "expires_at": {"oneOf": [{"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"}, {"type": "null"}]},
+    "truth_confidence": {"$ref": "definitions.schema.json#/$defs/truth_confidence"},
+    "provenance": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"$ref": "definitions.schema.json#/$defs/evidence_span"}},
+    "sensitivity": {"enum": ["public", "internal", "confidential", "restricted"]},
+    "retention": {"$ref": "definitions.schema.json#/$defs/retention"},
+    "lifecycle_state": {"enum": ["candidate", "active", "superseded", "disputed", "quarantined", "expired", "deleted"]},
+    "supersedes_revision": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+    "embedding_space_version": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+    "record_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "extensions": {"$ref": "definitions.schema.json#/$defs/extensions"}
+  }
+}

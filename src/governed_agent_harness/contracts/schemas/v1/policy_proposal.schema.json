@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-governance:contracts:v1:policy_proposal",
+  "title": "PolicyProposal v1",
+  "description": "An inert, version-bound policy artifact proposal. The legacy applied label is not a valid lifecycle state.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_type", "tenant_id", "proposal_id", "artifact_id", "artifact_revision", "target_scope", "policy_domain", "artifact", "evidence_refs", "provenance_digest", "producer_version", "runtime_version", "policy_refs", "reviewer_refs", "compatibility", "created_at", "expires_at", "lifecycle_state", "proposal_digest"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "record_type": {"const": "policy_proposal"},
+    "tenant_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "proposal_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "artifact_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "artifact_revision": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+    "target_scope": {"$ref": "memory_scope.schema.json"},
+    "policy_domain": {"enum": ["identity", "memory", "privacy", "retention", "effect", "approval", "evaluation", "activation", "rollback"]},
+    "artifact": {"type": "object", "minProperties": 1, "maxProperties": 128, "propertyNames": {"type": "string", "minLength": 1, "maxLength": 128}, "additionalProperties": {"$ref": "definitions.schema.json#/$defs/json_value"}},
+    "evidence_refs": {"type": "array", "minItems": 1, "maxItems": 4096, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "provenance_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "producer_version": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+    "runtime_version": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+    "policy_refs": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "reviewer_refs": {"type": "array", "maxItems": 64, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "compatibility": {"$ref": "definitions.schema.json#/$defs/compatibility"},
+    "created_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "expires_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "lifecycle_state": {"enum": ["pending", "approved", "rejected", "exported", "delivered", "delivery_failed", "rejected_by_runtime", "legacy_exported"]},
+    "proposal_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "extensions": {"$ref": "definitions.schema.json#/$defs/extensions"}
+  }
+}

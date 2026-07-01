@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-governance:contracts:v1:authorization_grant",
+  "title": "AuthorizationGrant v1",
+  "description": "A short-lived exact-request-bound grant whose consumption must be atomic at dispatch preparation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_type", "tenant_id", "grant_id", "actor_id", "run_id", "request_id", "request_digest", "tool_id", "tool_version", "policy_decision_id", "policy_decision_digest", "approval_refs", "constraints", "isolation_profile", "issued_at", "expires_at", "grant_nonce", "idempotency", "proof"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "record_type": {"const": "authorization_grant"},
+    "tenant_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "grant_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "actor_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "run_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "request_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "request_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "tool_id": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+    "tool_version": {"$ref": "definitions.schema.json#/$defs/short_identifier"},
+    "policy_decision_id": {"$ref": "definitions.schema.json#/$defs/uuid_v7"},
+    "policy_decision_digest": {"$ref": "definitions.schema.json#/$defs/sha256_digest"},
+    "approval_refs": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"$ref": "definitions.schema.json#/$defs/record_ref"}},
+    "constraints": {"$ref": "definitions.schema.json#/$defs/constraint_set"},
+    "isolation_profile": {"enum": ["none", "process", "container", "microvm", "network_restricted"]},
+    "issued_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "expires_at": {"$ref": "definitions.schema.json#/$defs/timestamp_utc_ms"},
+    "grant_nonce": {"type": "string", "minLength": 22, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$"},
+    "idempotency": {"$ref": "definitions.schema.json#/$defs/idempotency_binding"},
+    "proof": {
+      "allOf": [
+        {"$ref": "definitions.schema.json#/$defs/integrity_proof"},
+        {"properties": {"proof_domain": {"const": "authorization_grant.v1"}}}
+      ]
+    },
+    "extensions": {"$ref": "definitions.schema.json#/$defs/extensions"}
+  }
+}
