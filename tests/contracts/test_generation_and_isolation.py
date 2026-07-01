@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -26,6 +27,15 @@ AUTHORITATIVE_SCHEMAS = ROOT / "contracts" / "v1"
 PACKAGED_SCHEMAS = ROOT / "src" / "governed_agent_harness" / "contracts" / "schemas" / "v1"
 
 
+def _repository_build_artifacts() -> set[Path]:
+    artifact_names = {".pytest_cache", ".ruff_cache", "__pycache__", "build", "dist"}
+    return {
+        path.relative_to(ROOT)
+        for path in ROOT.rglob("*")
+        if path.is_dir() and (path.name in artifact_names or path.name.endswith(".egg-info"))
+    }
+
+
 def test_positive_fixture_generation_is_byte_for_byte_clean() -> None:
     generated = build_positive_fixture_files()
     actual = {path.name: path.read_bytes() for path in sorted(POSITIVE.glob("*.json"))}
@@ -43,8 +53,28 @@ def test_packaged_schemas_are_byte_identical_to_authority() -> None:
 
 
 def test_offline_installed_wheel_smoke(tmp_path: Path) -> None:
+    artifacts_before = _repository_build_artifacts()
+    build_root = tmp_path / "build-context"
+    build_root.mkdir()
+    shutil.copy2(ROOT / "pyproject.toml", build_root / "pyproject.toml")
+    shutil.copytree(
+        ROOT / "src",
+        build_root / "src",
+        ignore=shutil.ignore_patterns(
+            ".git",
+            ".pytest_cache",
+            ".ruff_cache",
+            "__pycache__",
+            "build",
+            "dist",
+            "*.egg-info",
+            "*.pyc",
+        ),
+    )
     wheelhouse = tmp_path / "wheelhouse"
     wheelhouse.mkdir()
+    build_environment = os.environ.copy()
+    build_environment.update({"PIP_NO_INDEX": "1", "PYTHONDONTWRITEBYTECODE": "1"})
     build = subprocess.run(
         [
             sys.executable,
@@ -57,11 +87,13 @@ def test_offline_installed_wheel_smoke(tmp_path: Path) -> None:
             str(wheelhouse),
             ".",
         ],
-        cwd=ROOT,
+        cwd=build_root,
+        env=build_environment,
         check=False,
         capture_output=True,
         text=True,
     )
+    assert _repository_build_artifacts() == artifacts_before
     assert build.returncode == 0, build.stderr
     wheel = next(wheelhouse.glob("governed_agent_harness-*.whl"))
     with zipfile.ZipFile(wheel) as archive:
