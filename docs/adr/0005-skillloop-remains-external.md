@@ -5,8 +5,9 @@
 
 ## Context
 
-SkillLoop already addresses trace normalization, evaluation, replay, proposal
-review, and dataset generation. Embedding or merging it into the live harness
+SkillLoop owns evaluation orchestration, replay benchmarking, datasets,
+proposal generation, review workflow, and promotion recommendation. Embedding
+or merging those responsibilities into the live harness
 would couple two lifecycles, broaden the trusted computing base, and risk
 allowing learning output to mutate production behavior.
 
@@ -22,9 +23,11 @@ The harness provides a versioned adapter with two one-way operations:
    format.
 2. Import reviewed artifacts into quarantine.
 
-Imported artifacts receive no special trust. They pass schema, digest,
-provenance, compatibility, policy, evaluation, approval, installation, staged
-activation, and rollback controls appropriate to their type.
+Imported artifacts and recommendations receive no special trust. The harness
+owns bounded quarantine, schema and digest validation, provenance and
+compatibility checks, policy and approval, installation, staged activation, and
+rollback controls appropriate to their type. Runtime activation is authorized
+independently of SkillLoop's review or promotion recommendation.
 
 SkillLoop has no direct write access to the live harness database, memory
 provider, skill registry, policy store, secret broker, or effect executors.
@@ -49,13 +52,20 @@ provider, skill registry, policy store, secret broker, or effect executors.
 
 ## Guardrails
 
-- Only terminal or explicitly checkpointed immutable ledger ranges are exported.
+- Only terminal or explicitly checkpointed ledger ranges are exported. Those
+  ranges are append-only through harness application interfaces and
+  tamper-evident within the documented threat model.
 - Export bundles carry schema versions, source ranges, filter digests, counts,
   and aggregate digests.
 - Secrets and unrelated tenant data are denied by default.
 - Imports are bounded and quarantined before parsing executable content.
 - SkillLoop evaluation success cannot grant permissions or approval.
+- SkillLoop promotion recommendations cannot authorize installation or runtime
+  activation.
 - No adapter code imports SkillLoop internals into the kernel.
+- The harness does not deploy a general evaluation, replay-benchmarking,
+  dataset-management, proposal-generation, or model-assisted evaluation
+  pipeline.
 - Adapter unavailability cannot weaken tool or memory governance.
 
 ## Alternatives rejected

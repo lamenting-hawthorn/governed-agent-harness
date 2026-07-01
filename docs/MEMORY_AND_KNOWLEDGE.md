@@ -18,7 +18,7 @@ knowledge is context, not permission.
 
 ```mermaid
 flowchart LR
-  Evidence["Immutable evidence"] --> Extract["Candidate extraction"]
+  Evidence["Append-only, tamper-evident evidence"] --> Extract["Candidate extraction"]
   Extract --> Dedupe["Deduplicate"]
   Dedupe --> Resolve["Entity and conflict resolution"]
   Resolve --> Classify["Privacy, risk, authority, retention"]

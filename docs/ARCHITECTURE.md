@@ -43,9 +43,10 @@ flowchart LR
   Kernel --> Sandbox["Effect executor / sandbox"]
   Kernel --> Store["Ledger + projections\nPGlite or Postgres"]
   Kernel <--> Providers["Model, memory, knowledge, skill providers"]
-  Store --> Eval["Evaluation pipeline"]
-  Eval --> Export["SkillLoop adapter / generic JSONL"]
-  Export -. "reviewed artifacts only" .-> Install["Artifact installation"]
+  Store --> Export["Policy-filtered evidence export"]
+  Export --> SkillLoop["External SkillLoop\nevaluation + learning plane"]
+  SkillLoop -. "reviewed candidate + recommendation" .-> Quarantine["Import quarantine"]
+  Quarantine --> Install["Authorized installation / activation"]
   Install --> Kernel
 ```
 
@@ -72,7 +73,8 @@ packages/
   memory/              proposals, promotion, retrieval, supersession
   knowledge/           source and retrieval provider contracts
   skills/              manifests, resolution, integrity, installation
-  evals/               deterministic metrics, replay, export jobs
+  verification/        deterministic runtime invariant and conformance checks
+  export/              policy-filtered evidence export jobs
   sandbox/             effect executors and resource limits
   identity/            authenticated actor and tenant context
   mcp/                 MCP transport mappings
@@ -101,7 +103,8 @@ flowchart BT
   Ledger["ledger"] --> Contracts
   Memory["memory"] --> Contracts
   Skills["skills"] --> Contracts
-  Evals["evals"] --> Contracts
+  Verification["verification"] --> Contracts
+  Export["export"] --> Contracts
   Adapters["engine, storage, transport, external adapters"] --> Ports
   Adapters --> Contracts
 ```
@@ -222,9 +225,11 @@ size-limited, classified, and sanitized before being returned or persisted.
 
 The durable model separates:
 
-- **Ledger:** immutable, ordered evidence envelopes.
+- **Ledger:** ordered evidence envelopes that are append-only through
+  application interfaces and hash-linked for tamper evidence within the
+  documented threat model.
 - **Projections:** rebuildable query models for runs, approvals, memories,
-  skills, and evaluation status.
+  skills, and import/activation status.
 - **Blobs:** encrypted or content-addressed large payloads referenced by digest.
 - **Checkpoints:** engine-specific opaque state, tagged with engine and schema
   versions.

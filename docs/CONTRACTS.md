@@ -119,7 +119,8 @@ type ToolRequest = {
 
 The kernel validates `arguments` against the installed tool schema and computes
 its own digest. Engine-provided digests, effects, and risk hints are advisory
-until verified. Tool names are resolved to immutable installed versions.
+until verified. Tool names are resolved to installed versions identified by
+immutable package digests.
 
 ## Policy decision
 
@@ -284,14 +285,20 @@ type EvalResult = {
 };
 ```
 
-An evaluation distinguishes `fail` from infrastructure `error` and insufficient
+`EvalResult` is the wire contract for results produced by SkillLoop or another
+external evaluator and for deterministic harness verification results. Its
+presence does not imply that the harness deploys evaluation orchestration,
+replay benchmarking, dataset management, or model-assisted judging. An
+evaluation distinguishes `fail` from infrastructure `error` and insufficient
 evidence `inconclusive`. Model-judged metrics identify the model, prompt digest,
 sampling parameters, and raw evidence policy.
 
 ## Commands versus events
 
 - A **command** requests a state transition and includes an idempotency key.
-- An **event** states that something occurred and is immutable.
+- An **event** states that something occurred. Accepted events are append-only
+  through application interfaces and tamper-evident within the documented
+  threat model; their canonical values and digests are immutable.
 - A **query result** is a projection and carries its ledger position.
 
 Commands are not appended as successful events until authorized validation has
