@@ -37,11 +37,13 @@ Exports carry classification, scope, schema version, and provenance.
 
 ## Evidence and memory lifecycle
 
-Raw evidence is immutable at the application level, access-controlled, and
-retained only as long as its declared purpose requires. Immutability does not
-override privacy deletion; deletion uses an authorized tombstone and removes or
-cryptographically erases governed payloads while preserving the minimum
-non-sensitive proof of the operation allowed by policy.
+Raw evidence is append-only through application interfaces, access-controlled,
+and tamper-evident within the documented threat model. It is retained only as
+long as its declared purpose requires. These properties do not override
+authorized privacy deletion or administrative operations; deletion uses an
+authorized tombstone and removes or cryptographically erases governed payloads
+while preserving the minimum non-sensitive proof of the operation allowed by
+policy.
 
 A `MemoryProposal` contains evidence references, exact evidence spans where
 possible, extractor/version provenance, proposed scope, type, confidence,

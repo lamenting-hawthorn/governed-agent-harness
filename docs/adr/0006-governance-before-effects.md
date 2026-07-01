@@ -25,7 +25,9 @@ The trusted path is:
 
 1. An execution engine or API proposes an effect; it does not execute it.
 2. The kernel validates and normalizes the request and trusted actor context.
-3. A versioned policy returns allow, deny, transform, or require-approval.
+3. A versioned policy returns an outcome from the canonical JSON Schema policy
+   vocabulary defined in `CONTRACTS.md`: `allow`, `deny`, `require_approval`,
+   `redact`, or `isolate`.
 4. The request and decision are appended to authoritative evidence.
 5. Approval, when required, is bound to actor, normalized request hash, policy,
    expiry, nonce, and single consumption.
