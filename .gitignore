@@ -1,7 +1,12 @@
 node_modules/
 dist/
+build/
 coverage/
 .turbo/
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/
 .env
 .env.*
 !.env.example
@@ -10,4 +15,3 @@ coverage/
 .idea/
 .vscode/
 .worktrees/
-

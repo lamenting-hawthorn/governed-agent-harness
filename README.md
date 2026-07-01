@@ -1,21 +1,24 @@
 # Governed Agent Harness
 
-Governed Agent Harness is a planned local-first agent runtime that combines a
-replaceable execution engine with enforceable policy gates, durable memory,
-portable skills, immutable run evidence, and controlled evaluation and learning.
+Governed Agent Harness is a new, standalone local-first agent harness with a
+replaceable execution engine, enforceable policy gates, durable memory,
+portable skills, tamper-evident run records, and controlled learning imports.
 
-The repository is currently in its architecture and documentation phase. See
-[the documentation index](docs/README.md) for the system specification and
-implementation sequence.
+Phase 0 provides the canonical v1 wire contracts, a dependency-free Python
+validation package, deterministic fixtures, and adversarial contract tests.
+Runtime execution, persistence, adapters, and production services are not yet
+implemented. See [the documentation index](docs/README.md) and
+[contract catalog](contracts/v1/catalog.json).
 
 ## Repository Status
 
 - Governed Agent Architecture remains an independent reference project.
 - SkillLoop remains an independent evaluation and learning project.
 - This repository owns the new execution harness and governance kernel.
+- Existing systems are reached only through future versioned adapters; their
+  implementation and Git history are not part of this repository.
 - Pi is the first planned execution-engine adapter, not a fork or permanent
   architectural dependency.
 
-No production implementation is claimed until the acceptance gates documented
-in this repository pass.
-
+See [provenance and clean-room boundaries](docs/PROVENANCE.md). No production
+readiness or completed security posture is claimed.
