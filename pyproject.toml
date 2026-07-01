@@ -11,8 +11,11 @@ dependencies = []
 
 [project.optional-dependencies]
 test = [
+    "build>=1.2,<2",
     "pytest>=8,<9",
     "ruff>=0.12,<1",
+    "setuptools>=68,<81",
+    "wheel>=0.44,<1",
 ]
 
 [tool.setuptools.packages.find]
