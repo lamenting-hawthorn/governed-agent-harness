@@ -36,7 +36,7 @@ flowchart LR
   Tests --> Evidence["Verified contract evidence"]
 
   Runtime["Bounded in-process kernel\nidentity, policy, approval, evidence"]
-  Effects["Effect execution"]:::planned
+  Effects["Bounded governed effects\nin-process synthetic executor"]
   Storage["Durable runtime storage"]:::planned
   Adapters["Engine and transport adapters"]:::planned
 
@@ -50,10 +50,10 @@ flowchart LR
 | Positive, negative, compatibility, and adversarial fixtures | Implemented | `tests/contracts/` |
 | Packaging and isolated wheel verification | Implemented | `pyproject.toml` and tests |
 | Bounded governance kernel | Implemented | `src/governed_agent_harness/kernel/`; injected identity and current approval trust, deterministic decisions, approval consumption, and in-memory evidence lifecycle |
-| Effect broker | Planned | Future runtime layer; no protected effect can execute in the current kernel |
+| Effect broker | Implemented, bounded | One in-process path issues an exact short-lived grant, appends intent evidence, consumes authority once, invokes an injected reversible synthetic executor, and appends outcome evidence |
 | CLI, SDK, HTTP/MCP surfaces | Planned | Future application layer |
 | Local/hosted durable storage | Planned | Future storage adapters |
-| Engine, sandbox, knowledge, and provider adapters | Planned | Future integration layer |
+| Sandbox, knowledge, and provider adapters | Planned | The current `none` isolation profile is not sandboxing and no provider executor ships |
 
 ### Target completed architecture
 
@@ -141,7 +141,7 @@ or a claim that a later stage has started.
 flowchart LR
   Foundation["1. Contract foundation\nschemas, validation, fixtures, packaging"]:::done
   Kernel["2. Governance kernel\nidentity, policy, approvals, lifecycle"]:::done
-  Effects["3. Governed effects\nbroker, engine adapter, sandbox, evidence"]:::planned
+  Effects["3. Governed effects\ngrant, broker, synthetic executor, evidence"]:::done
   State["4. Durable state\nledger, projections, memory, skills"]:::planned
   Surfaces["5. Product surfaces\nCLI, SDK, HTTP, MCP, diagnostics"]:::planned
   Operations["6. Operations + integrations\nhosted tenancy, observability, recovery,\nSkillLoop and Governed Agent Architecture adapters"]:::planned
@@ -156,8 +156,8 @@ flowchart LR
 | Stage | Principal deliverables | Completion evidence |
 | --- | --- | --- |
 | Contract foundation | Schemas, canonicalization, semantic validation, fixtures, wheel | Implemented and covered by the contract suite |
-| Governance kernel | Trusted identity, deterministic policy, approvals, evidence-first in-memory lifecycle state | Implemented and covered by public-flow, negative-path, and adversarial kernel tests; no grants or effect execution |
-| Governed effects | Replaceable engine boundary, effect broker, constrained executors | End-to-end proof that policy runs before every declared effect |
+| Governance kernel | Trusted identity, deterministic policy, approvals, evidence-first in-memory lifecycle state | Implemented and covered by public-flow, negative-path, and adversarial kernel tests |
+| Governed effects | Exact short-lived grant, sole broker, injected executor port, intent and outcome evidence | Implemented for one reversible in-process synthetic executor; no durable storage, provider, or sandbox proof |
 | Durable state | Evidence ledger, projections, governed memory, skill lifecycle | Restart, idempotency, replay, isolation, and recovery tests |
 | Product surfaces | CLI, SDK, HTTP/MCP, diagnostics, run inspection | One documented workflow through every supported surface |
 | Operations and integrations | Hosted storage, tenant controls, telemetry, backup/restore, optional adapters | Cross-backend conformance and operational exercises |

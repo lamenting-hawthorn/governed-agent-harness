@@ -1,4 +1,4 @@
-"""In-process, fail-closed governance kernel with no effect execution."""
+"""In-process, fail-closed governance and governed-effects kernel."""
 
 from .core import (
     GovernanceKernel,
@@ -11,9 +11,19 @@ from .core import (
     PolicyRule,
     PolicySet,
 )
+from .effects import (
+    AuthorizationGrantIssuer,
+    EffectConfigurationError,
+    EffectExecutor,
+    ExecutorCapabilities,
+)
 
 __all__ = [
     "GovernanceKernel",
+    "AuthorizationGrantIssuer",
+    "EffectConfigurationError",
+    "EffectExecutor",
+    "ExecutorCapabilities",
     "IdentityVerifier",
     "IdentityError",
     "InMemoryEvidenceLedger",

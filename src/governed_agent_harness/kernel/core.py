@@ -1,9 +1,4 @@
-"""Bounded Phase 2 orchestration for identity, policy, approval, and evidence.
-
-This module deliberately has no executor, transport, provider, persistence, or
-authorization-grant issuer. A successful approval is recorded as lifecycle
-state only; it cannot cause an external effect.
-"""
+"""Bounded in-process orchestration for identity, policy, approval, and effects."""
 
 from __future__ import annotations
 
@@ -13,13 +8,14 @@ import secrets
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Protocol
 
 from governed_agent_harness.contracts import (
     ActorContext,
     ApprovalRecord,
+    AuthorizationGrant,
     ConstraintRegistry,
     DetachedProofVerifier,
     EvidenceEnvelope,
@@ -32,10 +28,22 @@ from governed_agent_harness.contracts import (
     apply_object_digest,
     compare_idempotency_bindings,
     sha256_digest,
+    unsigned_body,
     validate_approval_binding,
     validate_constraint_support,
+    validate_grant_binding,
     verify_signed_record,
 )
+
+from .effects import (
+    AuthorizationGrantIssuer,
+    EffectBroker,
+    EffectConfigurationError,
+    EffectExecutor,
+)
+
+
+_GRANT_TTL = timedelta(minutes=5)
 
 
 class IdentityError(SemanticError):
@@ -58,12 +66,15 @@ class IdentityVerifier(Protocol):
 
 
 class KernelLifecycle(str, Enum):
-    """States reachable by the bounded kernel; none authorizes an effect."""
+    """States reachable by the bounded in-process governance lifecycle."""
 
     DENIED = "denied"
     APPROVAL_REQUIRED = "approval_required"
     POLICY_AUTHORIZED = "policy_authorized"
     APPROVED = "approved"
+    GRANT_ISSUED = "grant_issued"
+    EFFECT_SUCCEEDED = "effect_succeeded"
+    EFFECT_INDETERMINATE = "effect_indeterminate"
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +199,8 @@ class LifecycleRecord:
     state: KernelLifecycle
     evidence: tuple[Mapping[str, Any], ...]
     approval: Mapping[str, Any] | None = None
+    grant: Mapping[str, Any] | None = None
+    outcome: Mapping[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -196,6 +209,8 @@ class LifecycleRecord:
             "state": self.state.value,
             "evidence": copy.deepcopy(list(self.evidence)),
             "approval": copy.deepcopy(dict(self.approval)) if self.approval else None,
+            "grant": copy.deepcopy(dict(self.grant)) if self.grant else None,
+            "outcome": copy.deepcopy(dict(self.outcome)) if self.outcome else None,
         }
 
 
@@ -222,6 +237,8 @@ class InMemoryEvidenceLedger:
         with self._lock:
             events = self._by_tenant.setdefault(tenant_id, [])
             now = _utc_millis(self._clock())
+            if events and now < events[-1]["recorded_at"]:
+                raise LifecycleError("evidence time cannot precede the prior tenant event")
             draft = {
                 "schema_version": "1.0",
                 "record_type": "evidence_draft",
@@ -268,7 +285,7 @@ class InMemoryEvidenceLedger:
 
 
 class GovernanceKernel:
-    """A synchronous, no-effect orchestration boundary for Phase 2."""
+    """Synchronous in-process governance with one optional governed effect path."""
 
     def __init__(
         self,
@@ -277,9 +294,15 @@ class GovernanceKernel:
         identity_verifier: IdentityVerifier,
         approval_verifier: DetachedProofVerifier,
         approval_trust: Callable[[datetime], TrustContext],
+        grant_issuer: AuthorizationGrantIssuer | None = None,
+        grant_verifier: DetachedProofVerifier | None = None,
+        grant_trust: Callable[[datetime], TrustContext] | None = None,
+        executor: EffectExecutor | None = None,
         constraint_registry: ConstraintRegistry | None = None,
         clock: Callable[[], datetime] | None = None,
         ids: IdFactory | None = None,
+        nonce_factory: Callable[[], str] | None = None,
+        evidence_ledger: InMemoryEvidenceLedger | None = None,
     ) -> None:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._ids = ids or _Uuid7Factory(self._clock)
@@ -287,8 +310,25 @@ class GovernanceKernel:
         self._identity_verifier = identity_verifier
         self._approval_verifier = approval_verifier
         self._approval_trust_factory = approval_trust
+        self._grant_issuer = grant_issuer
+        self._grant_verifier = grant_verifier
+        self._grant_trust_factory = grant_trust
         self._constraint_registry = constraint_registry or ConstraintRegistry({})
-        self._ledger = InMemoryEvidenceLedger(clock=self._clock, ids=self._ids)
+        self._nonce_factory = nonce_factory or (lambda: secrets.token_urlsafe(18))
+        self._ledger = evidence_ledger or InMemoryEvidenceLedger(clock=self._clock, ids=self._ids)
+        self._broker = (
+            EffectBroker(
+                executor=executor,
+                constraint_registry=self._constraint_registry,
+                grant_verifier=grant_verifier,
+                grant_trust=grant_trust,
+                evidence=self._ledger,
+                clock=self._clock,
+                ids=self._ids,
+            )
+            if executor is not None and grant_verifier is not None and grant_trust is not None
+            else None
+        )
         self._lock = threading.RLock()
         self._idempotency: dict[tuple[str, str], tuple[dict[str, Any], str, str]] = {}
         self._records: dict[tuple[str, str], LifecycleRecord] = {}
@@ -448,6 +488,204 @@ class GovernanceKernel:
             self._records[key] = advanced
             return _snapshot(advanced)
 
+    def issue_grant(self, *, actor_context: Mapping[str, Any], request_id: str) -> LifecycleRecord:
+        """Issue one short-lived exact-binding grant from an authorized lifecycle state."""
+
+        actor = ActorContext(actor_context).to_dict()
+        with self._lock:
+            current = self._records.get((actor["tenant_id"], request_id))
+            if current is None or current.request["actor_id"] != actor["actor_id"]:
+                raise LifecycleError("actor-scoped request not found")
+            self._validate_identity(actor, current.request)
+            return _snapshot(self._issue_grant_locked(actor=actor, current=current))
+
+    def execute_effect(
+        self, *, actor_context: Mapping[str, Any], request_id: str
+    ) -> LifecycleRecord:
+        """Dispatch one governed effect through the sole broker and return its outcome."""
+
+        actor = ActorContext(actor_context).to_dict()
+        with self._lock:
+            key = (actor["tenant_id"], request_id)
+            current = self._records.get(key)
+            if current is None or current.request["actor_id"] != actor["actor_id"]:
+                raise LifecycleError("actor-scoped request not found")
+            self._validate_identity(actor, current.request)
+            if current.state in {
+                KernelLifecycle.EFFECT_SUCCEEDED,
+                KernelLifecycle.EFFECT_INDETERMINATE,
+            }:
+                return _snapshot(current)
+            if self._broker is None:
+                raise EffectConfigurationError(
+                    "effect broker requires an executor plus current grant trust verification"
+                )
+            if current.state in {
+                KernelLifecycle.POLICY_AUTHORIZED,
+                KernelLifecycle.APPROVED,
+            }:
+                approvals = (current.approval,) if current.approval is not None else ()
+                self._broker.validate_capabilities(
+                    request=current.request,
+                    isolation_profile=current.policy["isolation_profile"],
+                    constraints=_merge_constraints(current.policy, *approvals),
+                )
+                current = self._issue_grant_locked(actor=actor, current=current)
+            if current.state is not KernelLifecycle.GRANT_ISSUED or current.grant is None:
+                raise LifecycleError("effect is not valid in the current lifecycle state")
+            approvals = (current.approval,) if current.approval is not None else ()
+            execution = self._broker.dispatch(
+                actor_context=actor,
+                request=current.request,
+                policy=current.policy,
+                approvals=approvals,
+                authorization_grant=current.grant,
+            )
+            next_state = (
+                KernelLifecycle.EFFECT_SUCCEEDED
+                if execution.outcome["status"] == "succeeded"
+                else KernelLifecycle.EFFECT_INDETERMINATE
+            )
+            advanced = LifecycleRecord(
+                request=current.request,
+                policy=current.policy,
+                state=next_state,
+                evidence=(
+                    *current.evidence,
+                    execution.intent_evidence,
+                    execution.outcome_evidence,
+                ),
+                approval=current.approval,
+                grant=current.grant,
+                outcome=execution.outcome,
+            )
+            self._records[key] = advanced
+            return _snapshot(advanced)
+
+    def _issue_grant_locked(
+        self, *, actor: Mapping[str, Any], current: LifecycleRecord
+    ) -> LifecycleRecord:
+        if current.grant is not None and current.state in {
+            KernelLifecycle.GRANT_ISSUED,
+            KernelLifecycle.EFFECT_SUCCEEDED,
+            KernelLifecycle.EFFECT_INDETERMINATE,
+        }:
+            return current
+        if current.state not in {
+            KernelLifecycle.POLICY_AUTHORIZED,
+            KernelLifecycle.APPROVED,
+        }:
+            raise LifecycleError("grant is not valid in the current lifecycle state")
+        if (
+            self._grant_issuer is None
+            or self._grant_verifier is None
+            or self._grant_trust_factory is None
+        ):
+            raise EffectConfigurationError(
+                "grant issuance requires injected issuer and current proof trust verification"
+            )
+        if current.state is KernelLifecycle.APPROVED and current.approval is None:
+            raise LifecycleError("approved lifecycle state has no approval record")
+        if current.state is KernelLifecycle.POLICY_AUTHORIZED and current.approval is not None:
+            raise LifecycleError("policy-authorized lifecycle unexpectedly contains approval")
+
+        now = self._validate_identity(actor, current.request)
+        expiry_limit = min(
+            now + _GRANT_TTL,
+            _parse_contract_time(actor["expires_at"]),
+            *(
+                [_parse_contract_time(current.approval["expires_at"])]
+                if current.approval is not None
+                else []
+            ),
+        )
+        if expiry_limit <= now:
+            raise LifecycleError("no positive grant validity window remains")
+        approvals = (current.approval,) if current.approval is not None else ()
+        nonce = self._nonce_factory()
+        if (
+            not isinstance(nonce, str)
+            or not 22 <= len(nonce) <= 128
+            or re.fullmatch(r"[A-Za-z0-9_-]+", nonce) is None
+        ):
+            raise EffectConfigurationError("grant nonce factory returned an invalid nonce")
+        unsigned_grant = {
+            "schema_version": "1.0",
+            "record_type": "authorization_grant",
+            "tenant_id": current.request["tenant_id"],
+            "grant_id": self._ids(),
+            "actor_id": current.request["actor_id"],
+            "run_id": current.request["run_id"],
+            "request_id": current.request["request_id"],
+            "request_digest": current.request["request_digest"],
+            "tool_id": current.request["tool_id"],
+            "tool_version": current.request["tool_version"],
+            "policy_decision_id": current.policy["decision_id"],
+            "policy_decision_digest": current.policy["decision_digest"],
+            "approval_refs": [
+                {
+                    "record_type": "approval_record",
+                    "record_id": approval["approval_id"],
+                    "record_digest": approval["approval_digest"],
+                }
+                for approval in approvals
+            ],
+            "constraints": _merge_constraints(current.policy, *approvals),
+            "isolation_profile": current.policy["isolation_profile"],
+            "issued_at": _utc_millis(now),
+            "expires_at": _utc_millis(expiry_limit),
+            "grant_nonce": nonce,
+            "idempotency": copy.deepcopy(current.request["idempotency"]),
+        }
+        issued = self._grant_issuer.issue(unsigned_grant=copy.deepcopy(unsigned_grant))
+        grant = AuthorizationGrant(issued, expected_tenant=current.request["tenant_id"]).to_dict()
+        if unsigned_body(grant) != unsigned_grant:
+            raise EffectConfigurationError("grant issuer changed the kernel-authored grant body")
+        trust = self._grant_trust_factory(now)
+        if not isinstance(trust, TrustContext) or trust.now != now:
+            raise EffectConfigurationError(
+                "grant trust factory must return the current trust context"
+            )
+        validate_grant_binding(
+            grant,
+            current.request,
+            current.policy,
+            approvals,
+            constraint_registry=self._constraint_registry,
+            verifier=self._grant_verifier,
+            trust=trust,
+        )
+        policy_ref = {
+            "record_type": "policy_decision",
+            "record_id": current.policy["decision_id"],
+            "record_digest": current.policy["decision_digest"],
+        }
+        evidence = self._ledger.append(
+            tenant_id=current.request["tenant_id"],
+            run_id=current.request["run_id"],
+            event_kind="kernel.authorization_grant_issued",
+            policy_ref=policy_ref,
+            payload={
+                "actor_id": current.request["actor_id"],
+                "request_digest": current.request["request_digest"],
+                "policy_decision_digest": current.policy["decision_digest"],
+                "authorization_grant_digest": sha256_digest(grant),
+                "expires_at": grant["expires_at"],
+                "next_state": KernelLifecycle.GRANT_ISSUED.value,
+            },
+        )
+        advanced = LifecycleRecord(
+            request=current.request,
+            policy=current.policy,
+            state=KernelLifecycle.GRANT_ISSUED,
+            evidence=(*current.evidence, evidence),
+            approval=current.approval,
+            grant=grant,
+        )
+        key = (current.request["tenant_id"], current.request["request_id"])
+        self._records[key] = advanced
+        return advanced
+
     def get(self, *, actor_context: Mapping[str, Any], request_id: str) -> LifecycleRecord:
         """Read one lifecycle record using current, verified actor scope."""
 
@@ -519,4 +757,18 @@ def _snapshot(record: LifecycleRecord) -> LifecycleRecord:
         state=record.state,
         evidence=tuple(copy.deepcopy(dict(value)) for value in record.evidence),
         approval=copy.deepcopy(dict(record.approval)) if record.approval is not None else None,
+        grant=copy.deepcopy(dict(record.grant)) if record.grant is not None else None,
+        outcome=copy.deepcopy(dict(record.outcome)) if record.outcome is not None else None,
     )
+
+
+def _merge_constraints(*records: Mapping[str, Any]) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    for record in records:
+        for constraint in record.get("constraints", []):
+            key = (constraint["constraint_id"], constraint["constraint_version"])
+            existing = merged.get(key)
+            if existing is not None and existing != constraint:
+                raise LifecycleError(f"conflicting constraint binding {key[0]}@{key[1]}")
+            merged[key] = copy.deepcopy(dict(constraint))
+    return list(merged.values())

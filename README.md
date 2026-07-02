@@ -14,10 +14,13 @@ transport, storage product, or learning workflow.
 
 > **Project status:** the canonical contract foundation and a bounded,
 > in-process governance kernel are implemented and tested. The kernel accepts
-> identity only through an injected trust boundary, makes deterministic policy decisions, validates approvals against an injected current trust snapshot, and consumes approvals,
-> and appends in-memory evidence before lifecycle transitions. It does not issue
-> grants or execute effects. Durable state and product integrations remain
-> planned. This repository is not yet a production-ready agent platform.
+> identity only through an injected trust boundary, makes deterministic policy
+> decisions, validates and consumes approvals, issues exact-binding five-minute
+> authorization grants, and routes the implemented synthetic effect path through
+> one evidence-first broker. The executor is injected and in-process;
+> `isolation_profile="none"` is not a sandbox. Durable state, provider effects,
+> transports, and product integrations remain planned. This repository is not
+> yet a production-ready agent platform.
 
 ## Why this exists
 
@@ -51,7 +54,7 @@ flowchart LR
   Tests --> Wheel["Installable wheel\nverified outside source tree"]
 
   Kernel["Bounded governance kernel\nidentity + policy + approvals + evidence"]
-  Effects["Effect broker + sandbox"]:::planned
+  Effects["Bounded effect broker\nreversible synthetic executor"]
   Storage["Durable runtime state"]:::planned
   Surfaces["CLI + SDK + HTTP/MCP"]:::planned
 
@@ -65,8 +68,9 @@ flowchart LR
 | Typed models and semantic validation | Implemented | 27-record model registry and cross-record tests |
 | Digest, trust, approval, and lifecycle bindings | Implemented | Positive, negative, and adversarial tests |
 | Isolated wheel packaging | Implemented | Clean-environment installation test |
-| Bounded in-process governance kernel | Implemented | Public-flow, negative-path, and adversarial lifecycle tests; no effect execution |
-| Effect broker and sandbox | Planned | Requires end-to-end policy-before-effect proof |
+| Bounded in-process governance kernel | Implemented | Public-flow, negative-path, and adversarial lifecycle tests |
+| Bounded governed effects | Implemented | Exact signed grant, one broker, intent-before-executor evidence, outcome evidence, replay/concurrency proof, and a reversible synthetic executor only |
+| Sandbox and provider executors | Planned | Requires independently proved isolation and provider-specific enforcement |
 | Durable runtime storage and governed memory | Planned | Requires restart, isolation, and recovery proof |
 | CLI, SDK, HTTP/MCP, and hosted operations | Planned | Requires feature-level integration evidence |
 
@@ -224,7 +228,7 @@ alternate path around identity, policy, evidence, or the effect broker.
 flowchart LR
   Foundation["1. Contract foundation"]:::done
   Kernel["2. Governance kernel"]:::done
-  Effects["3. Governed effects"]:::planned
+  Effects["3. Governed effects"]:::done
   State["4. Durable state"]:::planned
   Product["5. Product surfaces"]:::planned
   Operations["6. Hosted operations\n+ integrations"]:::planned
@@ -239,8 +243,8 @@ flowchart LR
 | Stage | Principal deliverables | Completion boundary |
 | --- | --- | --- |
 | Contract foundation | Schemas, validation, fixtures, packaging | Implemented and covered by the contract suite |
-| Governance kernel | In-process identity propagation through an injected trust boundary, deterministic policy, exact approval binding, in-memory evidence-first lifecycle state | Implemented without grant issuance or effect execution |
-| Governed effects | Engine boundary, effect broker, constrained executors | End-to-end policy-before-effect proof |
+| Governance kernel | In-process identity propagation through an injected trust boundary, deterministic policy, exact approval binding, in-memory evidence-first lifecycle state | Implemented and covered by lifecycle tests |
+| Governed effects | Exact short-lived grant, sole effect broker, injected executor port, intent and outcome evidence | Implemented for one reversible in-process synthetic executor with no sandbox claim |
 | Durable state | Ledger, projections, memory, skills | Restart, replay, isolation, idempotency, and recovery tests |
 | Product surfaces | CLI, SDK, HTTP/MCP, diagnostics | Documented feature-level workflows through supported surfaces |
 | Hosted operations and integrations | Tenant controls, telemetry, backup/restore, optional adapters | Cross-backend conformance and operational exercises |
@@ -258,6 +262,7 @@ contracts/v1/                         canonical JSON Schema authority
 src/governed_agent_harness/contracts/ Python models and validators
 src/governed_agent_harness/kernel/    bounded in-process governance lifecycle
 tests/contracts/                      deterministic and adversarial evidence
+tests/e2e/                            public governed-effects flow proof
 tests/kernel/                         public-flow and adversarial kernel coverage
 docs/                                 architecture, security, operations, ADRs
 .github/workflows/                    continuous integration
@@ -274,8 +279,9 @@ exists. In particular:
 - signed-record helpers require a deployment-supplied proof verifier and trust
   policy;
 - local contract tests do not prove hosted tenant isolation;
-- sandboxing, secret brokerage, effect interception, and runtime enforcement
-  remain planned implementation layers; and
+- sandboxing, secret brokerage, provider effects, durable effect/outcome
+  atomicity, and hosted runtime enforcement remain planned implementation
+  layers; and
 - compliance or certification claims require deployment-specific evidence and
   independent review.
 
