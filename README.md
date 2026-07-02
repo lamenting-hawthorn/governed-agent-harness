@@ -23,11 +23,13 @@ workflow.
 
 ## Current status
 
-The repository currently contains the contract foundation and the bounded Phase
-1 governance kernel. It is suitable for architectural evaluation and continued
-implementation work; it is not presented as a production-ready agent platform.
-Runtime adapters, end-user CLI workflows, hosted operations, and deployment
-hardening remain explicit release milestones.
+The repository currently contains the contract foundation: canonical schemas,
+Python validation/canonicalization, deterministic fixtures, packaging, and
+adversarial contract tests. The runtime kernel and integrations described in
+the architecture documents are planned implementation layers, not claims about
+the current checkout. This project is suitable for architectural evaluation
+and continued implementation work; it is not presented as a production-ready
+agent platform.
 
 See the [documentation index](docs/README.md), [contract catalog](contracts/v1/catalog.json),
 [security model](docs/SECURITY_MODEL.md), and [release strategy](docs/RELEASE_STRATEGY.md).

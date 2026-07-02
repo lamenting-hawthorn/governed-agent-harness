@@ -17,6 +17,118 @@ The architecture has three primary boundaries:
    connect through versioned adapters. They are not copied into or required by
    the kernel.
 
+## Implementation status
+
+The current checkout implements the contract foundation only. The diagrams
+below intentionally separate shipped code from the target system so that
+architecture is not confused with runtime readiness.
+
+### Current checkout
+
+```mermaid
+flowchart LR
+  Schemas["Canonical JSON Schemas\ncontracts/v1"] --> Package["Python package\ncanonicalization + validation"]
+  Fixtures["Deterministic fixtures"] --> Tests["Contract, compatibility,\nnegative, and adversarial tests"]
+  Package --> Tests
+  Schemas --> Tests
+  Package --> Wheel["Installable package / wheel"]
+  Tests --> Evidence["Verified contract evidence"]
+
+  Runtime["Runtime kernel"]:::planned
+  Effects["Effect execution"]:::planned
+  Storage["Durable runtime storage"]:::planned
+  Adapters["Engine and transport adapters"]:::planned
+
+  classDef planned stroke-dasharray: 5 5,fill:#fff7ed,stroke:#c2410c
+```
+
+| Surface | Status | Boundary |
+| --- | --- | --- |
+| Versioned schemas and catalog | Implemented | `contracts/v1/` |
+| Python models, canonicalization, and validation | Implemented | `src/governed_agent_harness/contracts/` |
+| Positive, negative, compatibility, and adversarial fixtures | Implemented | `tests/contracts/` |
+| Packaging and isolated wheel verification | Implemented | `pyproject.toml` and tests |
+| Governance kernel and effect broker | Planned | Future runtime layer |
+| CLI, SDK, HTTP/MCP surfaces | Planned | Future application layer |
+| Local/hosted durable storage | Planned | Future storage adapters |
+| Engine, sandbox, knowledge, and provider adapters | Planned | Future integration layer |
+
+### Target completed architecture
+
+```mermaid
+flowchart TB
+  subgraph Surfaces["Application surfaces"]
+    CLI["CLI"]
+    SDK["SDK"]
+    HTTP["HTTP / MCP"]
+  end
+
+  Identity["Authenticated identity\nactor + tenant context"]
+  Service["Application service\nvalidated commands and queries"]
+
+  subgraph Kernel["Governance kernel"]
+    Contracts["Versioned contracts"]
+    Policy["Policy evaluator"]
+    Approval["Approval service"]
+    Ledger["Evidence ledger"]
+    Memory["Governed memory"]
+    Skills["Skill registry + installer"]
+    Broker["Effect broker"]
+  end
+
+  subgraph Adapters["Replaceable adapters"]
+    Engine["Execution engine"]
+    Storage["Local / hosted storage"]
+    Sandbox["Sandboxed executors"]
+    Knowledge["Knowledge providers"]
+  end
+
+  Effects["Protected effects\nfilesystem, network, messaging, data"]
+  Export["Policy-filtered export"]
+  Quarantine["Import quarantine\nschema + digest + review"]
+  SkillLoop["SkillLoop\noffline evaluation"]
+  GAA["Governed Agent Architecture\noptional interoperability"]
+
+  CLI --> Identity
+  SDK --> Identity
+  HTTP --> Identity
+  Identity --> Service
+  Service --> Contracts
+  Service --> Engine
+  Engine -->|proposes request| Contracts
+  Contracts --> Policy
+  Policy --> Approval
+  Policy --> Broker
+  Approval --> Broker
+  Broker --> Sandbox
+  Sandbox --> Effects
+  Broker --> Ledger
+  Ledger --> Storage
+  Memory --> Ledger
+  Skills --> Ledger
+  Knowledge --> Service
+  Ledger --> Export
+  Export --> SkillLoop
+  SkillLoop --> Quarantine
+  GAA -. "versioned adapter" .-> Service
+  Quarantine --> Skills
+  Quarantine --> Memory
+
+  classDef external fill:#eef2ff,stroke:#4f46e5
+  class SkillLoop,GAA external
+```
+
+In the completed system, every protected effect follows the same path:
+
+```text
+surface -> identity -> validated request -> policy -> approval if required
+        -> evidence append -> broker -> constrained executor -> effect result
+        -> evidence append -> governed result
+```
+
+No execution engine, transport, provider, or learning system receives an
+alternate path around the policy decision, evidence ledger, or effect broker.
+
 ## Design invariants
 
 - Every effectful tool call is synchronously evaluated by policy before it can
