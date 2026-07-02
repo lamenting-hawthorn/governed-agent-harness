@@ -73,7 +73,7 @@ Exit evidence:
 
 Purpose: demonstrate the complete local vertical slice.
 
-- Pi engine works behind `ExecutionEngine`.
+- A reference engine works behind `ExecutionEngine`.
 - A tool request is synchronously governed and evidenced.
 - Embedded memory survives restart and requires evidence plus policy promotion.
 - `init`, `doctor`, run inspection, and a safe replay path are usable.
@@ -86,7 +86,7 @@ Compatibility is best effort and every unstable surface is marked.
 Purpose: broaden adversarial coverage and validate replaceability.
 
 - At least one second engine or a contract test double proves the engine
-  boundary is not Pi-specific.
+  boundary is provider-neutral.
 - Embedded and hosted storage pass the same conformance suite.
 - Policy bypass, approval binding, memory poisoning, prompt injection,
   contradiction, deletion, and scope leakage tests run in CI.

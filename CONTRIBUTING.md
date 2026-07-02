@@ -17,7 +17,7 @@ contribute code or content you do not have the right to submit.
 
 ## Development principles
 
-- Keep the execution engine replaceable; Pi stays behind its adapter boundary.
+- Keep the execution engine replaceable and behind its adapter boundary.
 - Treat model output, skills, memory candidates, and external content as
   untrusted.
 - Route protected effects through synchronous policy evaluation.
@@ -79,10 +79,11 @@ test must fail CI or have a documented, expiring quarantine with an owner.
 
 ## Commits and provenance
 
-Write focused commits with imperative messages. Preserve authorship and third-
-party notices. If an AI tool materially assists a contribution, the contributor
-remains responsible for licensing, security, correctness, tests, and review.
-Do not submit generated code you cannot explain and maintain.
+Write focused commits with imperative messages. Preserve project authorship and
+the project's own history. Contributions that adapt public ideas or contracts
+from Governed Agent Architecture or SkillLoop must identify the relevant public
+boundary in the accompanying documentation. Do not submit code you cannot
+explain, test, and maintain.
 
 ## Community conduct and governance
 

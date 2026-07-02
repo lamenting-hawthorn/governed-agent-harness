@@ -5,7 +5,7 @@
 
 ## Context
 
-The harness must coordinate a TypeScript kernel, a Pi execution adapter,
+The harness must coordinate a TypeScript kernel, an execution adapter,
 multiple transports, storage backends, optional external systems, and Python
 consumers such as SkillLoop adapters. Handwritten types in each package would
 drift, and TypeScript types do not validate persisted or untrusted data.

@@ -28,9 +28,8 @@ request -> identity -> agent engine -> proposed effect -> policy decision
         -> memory proposal -> governed promotion -> later retrieval
 ```
 
-Pi is the first execution engine because it supplies a lightweight, capable
-agent loop. Pi remains behind a replaceable `ExecutionEngine` contract; the
-governance model must not depend on Pi-specific events or storage.
+Execution engines remain behind a replaceable `ExecutionEngine` contract; the
+governance model must not depend on provider-specific events or storage.
 
 ## Product principles
 
@@ -41,8 +40,8 @@ governance model must not depend on Pi-specific events or storage.
 3. **Local first, semantically portable.** A contributor can run the useful
    product without external infrastructure. Hosted deployments preserve the
    same contracts and decisions.
-4. **Engines are replaceable.** Pi is a dependency of one adapter, not the
-   architectural center of the system.
+4. **Engines are replaceable.** A provider is a dependency of an adapter, not
+   the architectural center of the system.
 5. **Capability claims are testable.** Every adapter declares whether it can
    observe, advise, gate, or isolate, and conformance tests verify the claim.
 6. **Learning is reviewed input.** Evaluations can propose changes but cannot
@@ -81,7 +80,8 @@ scope, provenance, revision, and expiry intact.
 
 ### Portable agent governance
 
-An integrator replaces Pi with another conforming execution engine. Policy,
+An integrator can replace one execution engine with another conforming engine.
+Policy,
 ledger, identity, memory, and evaluation semantics remain unchanged; only the
 capabilities truthfully supported by that engine are enabled.
 
@@ -119,7 +119,7 @@ retention, and audit export.
 
 ### Out of scope for the initial product
 
-- Forking or reimplementing Pi's general agent loop.
+- Forking or reimplementing a provider's general agent loop.
 - Merging, modifying, or requiring GAA or SkillLoop.
 - Claiming that MCP alone can govern host-native tools.
 - Autonomous policy, skill, prompt, or model mutation.

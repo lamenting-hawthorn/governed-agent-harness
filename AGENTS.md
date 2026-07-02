@@ -8,9 +8,8 @@ and learning are evidence-backed, policy-controlled, and auditable.
 ## Non-negotiable boundaries
 
 - Do not edit Governed Agent Architecture or SkillLoop from this repository.
-- Do not copy large implementations from Pi, GBrain, ECC, GCG, SkillLoop, or
-  Governed Agent Architecture. Reuse contracts and ideas with attribution.
-- Pi must remain behind the `ExecutionEngine` boundary.
+- Do not copy large implementations from SkillLoop or Governed Agent
+  Architecture. Reuse public contracts and ideas only with clear attribution.
 - MCP is an integration transport, not the complete governance boundary.
 - Tool execution must never bypass synchronous policy evaluation.
 - Memory must never be promoted without source evidence and a policy decision.
@@ -47,4 +46,3 @@ and learning are evidence-backed, policy-controlled, and auditable.
 The implementation plan defines the final commands. Until scaffolding exists,
 documentation changes must at minimum pass Markdown link checks, formatting
 checks, and `git diff --check`.
-

@@ -12,8 +12,8 @@ effect after it occurs and advice can influence an engine, yet neither can
 prevent an unauthorized file write, network request, message, database change,
 secret disclosure, memory promotion, skill installation, or learning import.
 
-The project needs a runtime-neutral invariant that remains true across Pi and
-future engines and that users can evaluate without confusing integration depth
+The project needs a runtime-neutral invariant that remains true across engines
+and that users can evaluate without confusing integration depth
 with enforcement.
 
 ## Decision

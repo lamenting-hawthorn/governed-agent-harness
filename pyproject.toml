@@ -6,8 +6,22 @@ build-backend = "setuptools.build_meta"
 name = "governed-agent-harness"
 version = "0.1.0"
 description = "Runtime-neutral contracts for a governed agent harness"
+authors = [{name = "Raghav"}]
+license = {file = "LICENSE"}
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+]
 
 [project.optional-dependencies]
 test = [

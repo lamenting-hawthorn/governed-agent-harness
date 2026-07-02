@@ -44,24 +44,18 @@ The engine receives only proxy tools. The proxy serializes a `ToolRequest` to
 the kernel; only the kernel can resolve an authorized request to an
 `EffectExecutor`.
 
-### Pi adapter
+### Execution-engine adapters
 
-Pi is the first reference engine and remains an upstream dependency behind
-`packages/execution-pi`.
+An execution-engine adapter maps provider lifecycle and tool hooks to canonical
+events, disables or wraps effectful native tools, and verifies at startup that
+every enabled effectful tool is proxied. A conformance test deliberately
+registers a native effectful tool and must prove startup rejection or
+interception.
 
-The adapter maps Pi lifecycle and tool hooks to canonical events, disables or
-wraps effectful native tools, and verifies at startup that every enabled
-effectful tool is proxied. A conformance test deliberately registers a native
-effectful tool and must prove startup rejection or interception.
-
-Pi session/checkpoint data is opaque to the kernel and tagged with:
-
-- Pi package version;
-- adapter version;
-- canonical protocol version;
-- checkpoint format version.
-
-No Pi type appears in public SDK signatures or persisted canonical payloads.
+Provider session and checkpoint data is opaque to the kernel and tagged with
+the provider version, adapter version, canonical protocol version, and
+checkpoint format version. Provider-specific types never appear in public SDK
+signatures or persisted canonical payloads.
 
 ## Transport surfaces
 
@@ -128,10 +122,6 @@ interface KnowledgeProvider {
 Results must carry source identity, revision, evidence location, retrieval score,
 and provider metadata. The kernel applies actor/tenant scope and output policy
 even if the provider also enforces access control.
-
-An optional GBrain adapter may implement this interface. GBrain remains
-separately installed and versioned. Provider-specific synthesis is labeled as
-derived content, not source evidence.
 
 ## Governed Agent Architecture adapter
 
@@ -210,10 +200,10 @@ Each adapter release publishes:
 |---|---|
 | Adapter version | `1.2.0` |
 | Protocol range | `>=1.1 <2` |
-| Upstream range | Pi `>=x <y` |
+| Upstream range | Provider-specific compatibility range |
 | Integration level | Gate |
 | Required kernel capabilities | `tool.pause`, `effect.proxy` |
-| Known limitations | no checkpoint resume across major Pi upgrade |
+| Known limitations | checkpoint resume may require adapter migration |
 
 Continuous integration tests the lowest and highest supported dependency
 versions. Unsupported combinations fail during negotiation, not during a run.

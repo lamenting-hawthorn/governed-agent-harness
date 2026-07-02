@@ -18,12 +18,12 @@ optional infrastructure:
 
 | Profile | Includes | Intended user |
 | --- | --- | --- |
-| `local` | CLI, Pi engine, embedded storage, local policy, basic isolation | Individual developer and quickstart |
+| `local` | CLI, reference engine, embedded storage, local policy, basic isolation | Individual developer and quickstart |
 | `sdk` | Contracts, kernel SDK, client types | Application integrator |
 | `server` | Daemon, hosted storage provider, service diagnostics | Team deployment |
 | `enterprise` | Enterprise extension points and deployment assets | Controlled organizational rollout |
 
-`local` is the default. Optional SkillLoop, GBrain, MCP, and engine adapters are
+`local` is the default. Optional SkillLoop, MCP, and engine adapters are
 installed explicitly and report their compatibility before activation.
 
 ## Golden path CLI
@@ -38,7 +38,7 @@ Next: gah doctor
 $ gah doctor
 Configuration       ok
 Storage             ok
-Execution engine    pi (compatible)
+Execution engine    reference adapter (compatible)
 Policy              local-safe (enforcing)
 Isolation           available
 

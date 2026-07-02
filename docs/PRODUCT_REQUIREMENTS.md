@@ -38,8 +38,8 @@ Normative words **MUST**, **SHOULD**, and **MAY** follow RFC 2119 usage.
 
 - **FR-010:** The kernel MUST invoke an engine only through the versioned
   `ExecutionEngine` contract.
-- **FR-011:** The Pi implementation MUST live in a dedicated adapter package;
-  kernel packages MUST NOT import Pi modules.
+- **FR-011:** Every execution-engine implementation MUST live in a dedicated
+  adapter package; kernel packages MUST NOT import provider modules.
 - **FR-012:** Each engine MUST publish a `CapabilityManifest` declaring its
   support for observe, advise, gate, isolate, streaming, resume, and replay.
 - **FR-013:** An engine MUST pass conformance tests for every capability it
@@ -223,7 +223,7 @@ Parity means equivalent contract semantics, not identical infrastructure.
 The first usable release must demonstrate:
 
 1. Initialize local state and diagnose it.
-2. Run the Pi engine through `ExecutionEngine`.
+2. Run a reference engine through `ExecutionEngine`.
 3. Intercept a tool request and allow, deny, or approve it.
 4. Execute an allowed request through the governed dispatcher.
 5. Inspect correlated append-only evidence.

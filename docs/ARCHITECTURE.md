@@ -11,11 +11,11 @@ The architecture has three primary boundaries:
 
 1. The **governance kernel** owns identity, policy, approvals, effect
    execution, evidence, and lifecycle state.
-2. An **execution engine** proposes model turns and tool calls. Pi is the first
-   adapter, but it has no privileged access to effects or persistence.
-3. **External systems** such as SkillLoop, Governed Agent Architecture, and
-   GBrain connect through versioned adapters. They are not copied into or
-   required by the kernel.
+2. An **execution engine** proposes model turns and tool calls. It has no
+   privileged access to effects or persistence.
+3. **External systems** such as SkillLoop and Governed Agent Architecture
+   connect through versioned adapters. They are not copied into or required by
+   the kernel.
 
 ## Design invariants
 
@@ -37,7 +37,7 @@ The architecture has three primary boundaries:
 ```mermaid
 flowchart LR
   Client["CLI / SDK / HTTP / MCP"] --> Kernel["Governance kernel"]
-  Kernel <--> Engine["ExecutionEngine\nPi first"]
+  Kernel <--> Engine["ExecutionEngine\nprovider-neutral"]
   Kernel --> Policy["Policy engine"]
   Policy <--> Approval["Approval provider"]
   Kernel --> Sandbox["Effect executor / sandbox"]
@@ -64,7 +64,7 @@ apps/
 packages/
   contracts/           canonical schemas, generated types, compatibility
   kernel/              run coordinator and lifecycle state machines
-  execution-pi/        Pi-backed ExecutionEngine adapter
+  execution-adapter/  ExecutionEngine adapter
   policy/              decisions, rules, risk, approval orchestration
   ledger/              append-only events, hashes, projections
   storage/             storage interfaces, transactions, migrations
@@ -83,7 +83,6 @@ packages/
 adapters/
   skillloop/           offline trace export and reviewed import
   governed-memory/     optional external memory provider
-  gbrain/              optional external knowledge provider
   generic-jsonl/       language-neutral event interchange
 schemas/               source JSON Schemas and compatibility fixtures
 ```
@@ -112,8 +111,8 @@ flowchart BT
 Rules:
 
 - `contracts` has no dependency on runtime packages.
-- The kernel depends on interfaces, never Pi, Postgres, PGlite, MCP, or an
-  external project.
+- The kernel depends on interfaces, never a model provider, Postgres, PGlite,
+  MCP, or an external project.
 - Storage and engine adapters depend inward on ports and contracts.
 - Transport packages translate and authenticate; they do not decide policy.
 - External adapters cannot write projections directly. They submit commands to
@@ -294,8 +293,8 @@ explicit ports and publish capability manifests. Startup performs compatibility
 negotiation and refuses unsupported required capabilities. Extensions run with
 least privilege and do not receive kernel internals.
 
-Pi is the first engine adapter. Pi event types are translated at its package
-boundary; Pi-specific objects must not cross into `contracts` or the kernel.
+An engine adapter translates provider-specific events at its package boundary;
+provider-specific objects must not cross into `contracts` or the kernel.
 MCP is a transport and integration surface, not a guarantee that native tools
 inside another host can be intercepted.
 

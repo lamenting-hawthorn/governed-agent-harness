@@ -52,7 +52,7 @@ durability, and migration compatibility.
 The release E2E test starts from a clean machine/container and must:
 
 1. Install using documented commands without external infrastructure.
-2. Initialize local identity, policy, storage, and the Pi adapter.
+2. Initialize local identity, policy, storage, and a reference engine adapter.
 3. Run a request that proposes a harmless tool call.
 4. Demonstrate allow, deny, and approval decisions.
 5. Execute only the normalized approved request in its declared boundary.

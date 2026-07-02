@@ -52,7 +52,7 @@ The initial release is done when a new contributor can, from a clean supported
 environment:
 
 1. Install and initialize local mode using documented commands.
-2. Run the Pi-backed reference engine without an external database.
+2. Run a reference execution engine without an external database.
 3. Exercise allow, deny, and approval for a tool request.
 4. Confirm only the policy-bound request executes.
 5. Inspect correlated, replayable evidence for request through outcome.

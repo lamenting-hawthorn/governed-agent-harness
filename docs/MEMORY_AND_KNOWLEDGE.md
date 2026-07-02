@@ -158,7 +158,7 @@ not mutable array position alone.
 
 The built-in local provider uses PGlite; hosted deployments use Postgres. Both
 implement the same domain behavior and conformance suite. Optional providers,
-including GBrain or an adapter to Governed Agent Architecture, may implement
+including an adapter to Governed Agent Architecture, may implement
 search or storage ports but cannot bypass promotion policy or ledger events.
 
 Provider capability manifests declare:
