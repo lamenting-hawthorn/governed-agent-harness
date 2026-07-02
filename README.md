@@ -223,7 +223,7 @@ alternate path around identity, policy, evidence, or the effect broker.
 ```mermaid
 flowchart LR
   Foundation["1. Contract foundation"]:::done
-  Kernel["2. Governance kernel"]:::planned
+  Kernel["2. Governance kernel"]:::done
   Effects["3. Governed effects"]:::planned
   State["4. Durable state"]:::planned
   Product["5. Product surfaces"]:::planned
@@ -256,7 +256,9 @@ acceptance evidence exist. The detailed path lives in the
 ```text
 contracts/v1/                         canonical JSON Schema authority
 src/governed_agent_harness/contracts/ Python models and validators
+src/governed_agent_harness/kernel/    bounded in-process governance lifecycle
 tests/contracts/                      deterministic and adversarial evidence
+tests/kernel/                         public-flow and adversarial kernel coverage
 docs/                                 architecture, security, operations, ADRs
 .github/workflows/                    continuous integration
 pyproject.toml                        package and tool configuration

@@ -140,7 +140,7 @@ or a claim that a later stage has started.
 ```mermaid
 flowchart LR
   Foundation["1. Contract foundation\nschemas, validation, fixtures, packaging"]:::done
-  Kernel["2. Governance kernel\nidentity, policy, approvals, lifecycle"]:::planned
+  Kernel["2. Governance kernel\nidentity, policy, approvals, lifecycle"]:::done
   Effects["3. Governed effects\nbroker, engine adapter, sandbox, evidence"]:::planned
   State["4. Durable state\nledger, projections, memory, skills"]:::planned
   Surfaces["5. Product surfaces\nCLI, SDK, HTTP, MCP, diagnostics"]:::planned
@@ -156,7 +156,7 @@ flowchart LR
 | Stage | Principal deliverables | Completion evidence |
 | --- | --- | --- |
 | Contract foundation | Schemas, canonicalization, semantic validation, fixtures, wheel | Implemented and covered by the contract suite |
-| Governance kernel | Trusted identity, authorization, policy, approvals, lifecycle state | Negative-path and authorization-binding tests |
+| Governance kernel | Trusted identity, deterministic policy, approvals, evidence-first in-memory lifecycle state | Implemented and covered by public-flow, negative-path, and adversarial kernel tests; no grants or effect execution |
 | Governed effects | Replaceable engine boundary, effect broker, constrained executors | End-to-end proof that policy runs before every declared effect |
 | Durable state | Evidence ledger, projections, governed memory, skill lifecycle | Restart, idempotency, replay, isolation, and recovery tests |
 | Product surfaces | CLI, SDK, HTTP/MCP, diagnostics, run inspection | One documented workflow through every supported surface |

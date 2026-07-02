@@ -20,8 +20,10 @@ from typing import Any, Protocol
 from governed_agent_harness.contracts import (
     ActorContext,
     ApprovalRecord,
+    ConstraintRegistry,
     DetachedProofVerifier,
     EvidenceEnvelope,
+    IdempotencyConflictError,
     IdempotencyResult,
     PolicyDecision,
     SemanticError,
@@ -31,6 +33,7 @@ from governed_agent_harness.contracts import (
     compare_idempotency_bindings,
     sha256_digest,
     validate_approval_binding,
+    validate_constraint_support,
     verify_signed_record,
 )
 
@@ -81,10 +84,15 @@ class PolicyRule:
             raise PolicyConfigurationError("policy rule decision is unsupported")
         if not self.effect_classes:
             raise PolicyConfigurationError("policy rule must cover at least one effect class")
-        if self.decision == "authorize" and self.isolation_profile == "no_effect":
-            raise PolicyConfigurationError("authorize rule cannot use no_effect isolation")
-        if self.decision != "authorize" and self.isolation_profile != "no_effect":
-            raise PolicyConfigurationError("non-authorize rules must use no_effect isolation")
+        executable_profiles = {"process", "container", "microvm", "network_restricted"}
+        if self.decision in {"authorize", "require_approval"} and (
+            self.isolation_profile not in executable_profiles
+        ):
+            raise PolicyConfigurationError(
+                "authorize and require_approval rules need a supported executable isolation profile"
+            )
+        if self.decision == "deny" and self.isolation_profile != "no_effect":
+            raise PolicyConfigurationError("deny rules must use no_effect isolation")
         for constraint in self.constraints:
             if not isinstance(constraint, Mapping):
                 raise PolicyConfigurationError("policy constraint must be a mapping")
@@ -250,9 +258,13 @@ class InMemoryEvidenceLedger:
             events.append(parsed)
             return copy.deepcopy(parsed)
 
-    def events(self, tenant_id: str) -> tuple[dict[str, Any], ...]:
+    def _events_for_actor(self, tenant_id: str, actor_id: str) -> tuple[dict[str, Any], ...]:
         with self._lock:
-            return tuple(copy.deepcopy(self._by_tenant.get(tenant_id, [])))
+            return tuple(
+                copy.deepcopy(event)
+                for event in self._by_tenant.get(tenant_id, [])
+                if event["draft"]["inline_payload"].get("actor_id") == actor_id
+            )
 
 
 class GovernanceKernel:
@@ -265,6 +277,7 @@ class GovernanceKernel:
         identity_verifier: IdentityVerifier,
         approval_verifier: DetachedProofVerifier,
         approval_trust: Callable[[datetime], TrustContext],
+        constraint_registry: ConstraintRegistry | None = None,
         clock: Callable[[], datetime] | None = None,
         ids: IdFactory | None = None,
     ) -> None:
@@ -274,15 +287,12 @@ class GovernanceKernel:
         self._identity_verifier = identity_verifier
         self._approval_verifier = approval_verifier
         self._approval_trust_factory = approval_trust
+        self._constraint_registry = constraint_registry or ConstraintRegistry({})
         self._ledger = InMemoryEvidenceLedger(clock=self._clock, ids=self._ids)
         self._lock = threading.RLock()
-        self._idempotency: dict[tuple[str, str], dict[str, Any]] = {}
+        self._idempotency: dict[tuple[str, str], tuple[dict[str, Any], str, str]] = {}
         self._records: dict[tuple[str, str], LifecycleRecord] = {}
         self._consumed_approvals: set[tuple[str, str, str]] = set()
-
-    @property
-    def ledger(self) -> InMemoryEvidenceLedger:
-        return self._ledger
 
     def submit(
         self, *, actor_context: Mapping[str, Any], tool_request: Mapping[str, Any]
@@ -296,14 +306,24 @@ class GovernanceKernel:
         binding_key = (request["tenant_id"], request["idempotency"]["idempotency_key"])
 
         with self._lock:
+            existing_binding = self._idempotency.get(binding_key)
             replay = compare_idempotency_bindings(
-                self._idempotency.get(binding_key), request["idempotency"]
+                existing_binding[0] if existing_binding is not None else None,
+                request["idempotency"],
             )
             existing = self._records.get(key)
             if replay is IdempotencyResult.REPLAY:
-                if existing is None:
+                if existing_binding is None:
+                    raise LifecycleError("idempotency replay has no stored binding")
+                _, original_request_id, original_request_digest = existing_binding
+                if original_request_digest != request["request_digest"]:
+                    raise IdempotencyConflictError(
+                        "idempotency replay request does not match the original request digest"
+                    )
+                original = self._records.get((request["tenant_id"], original_request_id))
+                if original is None:
                     raise LifecycleError("idempotency replay has no lifecycle record")
-                return _snapshot(existing)
+                return _snapshot(original)
             if existing is not None:
                 raise LifecycleError(
                     "request_id is already present with another idempotency binding"
@@ -326,6 +346,7 @@ class GovernanceKernel:
             }
             apply_object_digest(decision)
             decision = PolicyDecision(decision, expected_tenant=request["tenant_id"]).to_dict()
+            validate_constraint_support(decision, self._constraint_registry)
             policy_ref = {
                 "record_type": "policy_decision",
                 "record_id": decision["decision_id"],
@@ -342,13 +363,18 @@ class GovernanceKernel:
                 event_kind="kernel.policy_decided",
                 policy_ref=policy_ref,
                 payload={
+                    "actor_id": request["actor_id"],
                     "request_digest": request["request_digest"],
                     "policy_decision_digest": decision["decision_digest"],
                     "next_state": next_state.value,
                 },
             )
             record = LifecycleRecord(request, decision, next_state, (evidence,))
-            self._idempotency[binding_key] = copy.deepcopy(request["idempotency"])
+            self._idempotency[binding_key] = (
+                copy.deepcopy(request["idempotency"]),
+                request["request_id"],
+                request["request_digest"],
+            )
             self._records[key] = record
             return _snapshot(record)
 
@@ -403,6 +429,7 @@ class GovernanceKernel:
                 event_kind="kernel.approval_accepted",
                 policy_ref=policy_ref,
                 payload={
+                    "actor_id": current.request["actor_id"],
                     "request_digest": current.request["request_digest"],
                     "approval_digest": parsed["approval_digest"],
                     "next_state": KernelLifecycle.APPROVED.value,
@@ -420,16 +447,27 @@ class GovernanceKernel:
             self._records[key] = advanced
             return _snapshot(advanced)
 
-    def get(self, *, tenant_id: str, request_id: str) -> LifecycleRecord:
+    def get(self, *, actor_context: Mapping[str, Any], request_id: str) -> LifecycleRecord:
+        """Read one lifecycle record using current, verified actor scope."""
+
+        actor = self._validated_actor(actor_context)
         with self._lock:
             try:
-                return _snapshot(self._records[(tenant_id, request_id)])
+                record = self._records[(actor["tenant_id"], request_id)]
             except KeyError as exc:
                 raise LifecycleError("unknown tenant-scoped request") from exc
+            if record.request["actor_id"] != actor["actor_id"]:
+                raise IdentityError("actor context cannot read another actor's request")
+            return _snapshot(record)
+
+    def events(self, *, actor_context: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
+        """Read actor-scoped tenant evidence only after trusted identity verification."""
+
+        actor = self._validated_actor(actor_context)
+        return self._ledger._events_for_actor(actor["tenant_id"], actor["actor_id"])
 
     def _validate_identity(self, actor: Mapping[str, Any], request: Mapping[str, Any]) -> None:
-        if self._identity_verifier.verify(actor_context=copy.deepcopy(dict(actor))) is not True:
-            raise IdentityError("actor context is not trusted by the identity boundary")
+        self._validate_actor(actor)
         if actor["tenant_id"] != request["tenant_id"] or actor["actor_id"] != request["actor_id"]:
             raise IdentityError("request tenant and actor must match authenticated actor context")
         if request["actor_context_digest"] != sha256_digest(actor):
@@ -444,6 +482,23 @@ class GovernanceKernel:
         if not issued <= requested <= expires:
             raise IdentityError("request time is outside the actor context validity window")
         if normalized_now >= expires:
+            raise IdentityError("actor context is expired")
+
+    def _validated_actor(self, actor_context: Mapping[str, Any]) -> dict[str, Any]:
+        actor = ActorContext(actor_context).to_dict()
+        self._validate_actor(actor)
+        return actor
+
+    def _validate_actor(self, actor: Mapping[str, Any]) -> None:
+        if self._identity_verifier.verify(actor_context=copy.deepcopy(dict(actor))) is not True:
+            raise IdentityError("actor context is not trusted by the identity boundary")
+        now = self._clock()
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise IdentityError("kernel clock must return a timezone-aware timestamp")
+        normalized_now = now.astimezone(timezone.utc)
+        if normalized_now < _parse_contract_time(actor["issued_at"]):
+            raise IdentityError("actor context is not currently valid")
+        if normalized_now >= _parse_contract_time(actor["expires_at"]):
             raise IdentityError("actor context is expired")
 
 
