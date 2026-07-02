@@ -84,7 +84,7 @@ class PolicyRule:
             raise PolicyConfigurationError("policy rule decision is unsupported")
         if not self.effect_classes:
             raise PolicyConfigurationError("policy rule must cover at least one effect class")
-        executable_profiles = {"process", "container", "microvm", "network_restricted"}
+        executable_profiles = {"none", "process", "container", "microvm", "network_restricted"}
         if self.decision in {"authorize", "require_approval"} and (
             self.isolation_profile not in executable_profiles
         ):
@@ -301,7 +301,7 @@ class GovernanceKernel:
 
         actor = ActorContext(actor_context).to_dict()
         request = ToolRequest(tool_request, expected_tenant=actor["tenant_id"]).to_dict()
-        self._validate_identity(actor, request)
+        decision_time = self._validate_identity(actor, request)
         key = (request["tenant_id"], request["request_id"])
         binding_key = (request["tenant_id"], request["idempotency"]["idempotency_key"])
 
@@ -330,7 +330,7 @@ class GovernanceKernel:
                 )
 
             rule = self._policy.evaluate(request)
-            now = _utc_millis(self._clock())
+            now = _utc_millis(decision_time)
             decision = {
                 "schema_version": "1.0",
                 "record_type": "policy_decision",
@@ -393,6 +393,7 @@ class GovernanceKernel:
 
             parsed = ApprovalRecord(approval, expected_tenant=tenant_id).to_dict()
             validate_approval_binding(parsed, current.policy, current.request)
+            validate_constraint_support(parsed, self._constraint_registry)
             if parsed["disposition"] != "approved":
                 raise LifecycleError("only an approved approval record may advance lifecycle")
             duties = parsed["separation_of_duties"]
@@ -452,12 +453,9 @@ class GovernanceKernel:
 
         actor = self._validated_actor(actor_context)
         with self._lock:
-            try:
-                record = self._records[(actor["tenant_id"], request_id)]
-            except KeyError as exc:
-                raise LifecycleError("unknown tenant-scoped request") from exc
-            if record.request["actor_id"] != actor["actor_id"]:
-                raise IdentityError("actor context cannot read another actor's request")
+            record = self._records.get((actor["tenant_id"], request_id))
+            if record is None or record.request["actor_id"] != actor["actor_id"]:
+                raise LifecycleError("actor-scoped request not found")
             return _snapshot(record)
 
     def events(self, *, actor_context: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
@@ -466,7 +464,7 @@ class GovernanceKernel:
         actor = self._validated_actor(actor_context)
         return self._ledger._events_for_actor(actor["tenant_id"], actor["actor_id"])
 
-    def _validate_identity(self, actor: Mapping[str, Any], request: Mapping[str, Any]) -> None:
+    def _validate_identity(self, actor: Mapping[str, Any], request: Mapping[str, Any]) -> datetime:
         self._validate_actor(actor)
         if actor["tenant_id"] != request["tenant_id"] or actor["actor_id"] != request["actor_id"]:
             raise IdentityError("request tenant and actor must match authenticated actor context")
@@ -481,8 +479,11 @@ class GovernanceKernel:
         normalized_now = now.astimezone(timezone.utc)
         if not issued <= requested <= expires:
             raise IdentityError("request time is outside the actor context validity window")
+        if requested > normalized_now:
+            raise IdentityError("request time is in the future")
         if normalized_now >= expires:
             raise IdentityError("actor context is expired")
+        return normalized_now
 
     def _validated_actor(self, actor_context: Mapping[str, Any]) -> dict[str, Any]:
         actor = ActorContext(actor_context).to_dict()

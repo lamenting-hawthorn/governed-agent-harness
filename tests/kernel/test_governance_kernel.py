@@ -10,12 +10,14 @@ from typing import Any
 import pytest
 
 from governed_agent_harness.contracts import (
+    AuthorizationGrant,
     ConstraintRegistry,
     IdempotencyConflictError,
     ProofVerificationError,
     SemanticError,
     apply_object_digest,
     sha256_digest,
+    validate_grant_binding,
 )
 from governed_agent_harness.kernel import (
     GovernanceKernel,
@@ -55,13 +57,22 @@ def _approval_policy() -> PolicySet:
 
 
 def _kernel(
-    verifier: Any, trust_factory: Any, identity_verifier: RecordingIdentityVerifier | None = None
+    verifier: Any,
+    trust_factory: Any,
+    identity_verifier: RecordingIdentityVerifier | None = None,
+    constraint_registry: ConstraintRegistry | None = None,
 ) -> GovernanceKernel:
+    registry = (
+        constraint_registry
+        if constraint_registry is not None
+        else ConstraintRegistry({"example.org/max_actions": frozenset({"1.0"})})
+    )
     return GovernanceKernel(
         policy=_approval_policy(),
         identity_verifier=identity_verifier or RecordingIdentityVerifier(),
         approval_verifier=verifier,
         approval_trust=lambda now: trust_factory(now=now),
+        constraint_registry=registry,
         clock=lambda: NOW,
     )
 
@@ -94,6 +105,36 @@ def _other_tenant(record: dict[str, Any]) -> dict[str, Any]:
     return apply_object_digest(record)
 
 
+def _grant_for_result(
+    grant: dict[str, Any],
+    result: Any,
+    *,
+    approval: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    request = result.request
+    policy = result.policy
+    for field in ("tenant_id", "actor_id", "run_id", "request_id", "request_digest"):
+        grant[field] = request[field]
+    grant["tool_id"] = request["tool_id"]
+    grant["tool_version"] = request["tool_version"]
+    grant["policy_decision_id"] = policy["decision_id"]
+    grant["policy_decision_digest"] = policy["decision_digest"]
+    grant["constraints"] = copy.deepcopy(policy["constraints"])
+    grant["isolation_profile"] = policy["isolation_profile"]
+    grant["issued_at"] = policy["decided_at"]
+    grant["approval_refs"] = []
+    if approval is not None:
+        grant["approval_refs"] = [
+            {
+                "record_type": "approval_record",
+                "record_id": approval["approval_id"],
+                "record_digest": approval["approval_digest"],
+            }
+        ]
+        grant["constraints"].extend(copy.deepcopy(approval["constraints"]))
+    return apply_object_digest(grant)
+
+
 def test_public_kernel_flow_is_evidence_first_and_never_executes_an_effect(
     records: dict[str, dict[str, Any]], verifier: Any, trust_factory: Any
 ) -> None:
@@ -124,6 +165,101 @@ def test_public_kernel_flow_is_evidence_first_and_never_executes_an_effect(
     assert [event["sequence_number"] for event in approved.evidence] == [0, 1]
     assert approved.evidence[1]["prior_event_digest"] == approved.evidence[0]["event_digest"]
     assert len(kernel.events(actor_context=records["actor_context"])) == 2
+    grant = _grant_for_result(
+        records["authorization_grant"], approved, approval=dict(approved.approval)
+    )
+    AuthorizationGrant(grant, expected_tenant=approved.request["tenant_id"])
+    validate_grant_binding(
+        grant,
+        approved.request,
+        approved.policy,
+        [approved.approval],
+        constraint_registry=ConstraintRegistry({"example.org/max_actions": frozenset({"1.0"})}),
+        verifier=verifier,
+        trust=trust_factory(now=NOW),
+    )
+
+
+@pytest.mark.parametrize(
+    ("registry", "constraint_id", "constraint_version"),
+    [
+        (None, "example.org/max_actions", "1.0"),
+        (ConstraintRegistry({}), "example.org/max_actions", "1.0"),
+        (
+            ConstraintRegistry({"example.org/max_actions": frozenset({"1.0"})}),
+            "unsupported.example/rule",
+            "1.0",
+        ),
+        (
+            ConstraintRegistry({"example.org/max_actions": frozenset({"1.0"})}),
+            "example.org/max_actions",
+            "2.0",
+        ),
+    ],
+)
+def test_unsupported_approval_constraints_fail_before_evidence_or_state_change(
+    records: dict[str, dict[str, Any]],
+    verifier: Any,
+    trust_factory: Any,
+    registry: ConstraintRegistry | None,
+    constraint_id: str,
+    constraint_version: str,
+) -> None:
+    if registry is None:
+        kernel = GovernanceKernel(
+            policy=_approval_policy(),
+            identity_verifier=RecordingIdentityVerifier(),
+            approval_verifier=verifier,
+            approval_trust=lambda now: trust_factory(now=now),
+            clock=lambda: NOW,
+        )
+    else:
+        kernel = _kernel(verifier, trust_factory, constraint_registry=registry)
+    awaiting = kernel.submit(
+        actor_context=records["actor_context"], tool_request=records["tool_request"]
+    )
+    approval = _bound_approval(
+        records["approval_record"], policy=dict(awaiting.policy), request=dict(awaiting.request)
+    )
+    approval["constraints"][0]["constraint_id"] = constraint_id
+    approval["constraints"][0]["constraint_version"] = constraint_version
+    apply_object_digest(approval)
+
+    with pytest.raises(SemanticError, match="unsupported constraint"):
+        kernel.accept_approval(
+            tenant_id=awaiting.request["tenant_id"],
+            request_id=awaiting.request["request_id"],
+            approval=approval,
+        )
+    stored = kernel.get(
+        actor_context=records["actor_context"], request_id=awaiting.request["request_id"]
+    )
+    assert stored.state is KernelLifecycle.APPROVAL_REQUIRED
+    assert stored.approval is None
+    assert len(kernel.events(actor_context=records["actor_context"])) == 1
+
+
+def test_unconstrained_approval_remains_valid_with_empty_registry(
+    records: dict[str, dict[str, Any]], verifier: Any, trust_factory: Any
+) -> None:
+    kernel = _kernel(verifier, trust_factory, constraint_registry=ConstraintRegistry({}))
+    awaiting = kernel.submit(
+        actor_context=records["actor_context"], tool_request=records["tool_request"]
+    )
+    approval = _bound_approval(
+        records["approval_record"], policy=dict(awaiting.policy), request=dict(awaiting.request)
+    )
+    approval["constraints"] = []
+    apply_object_digest(approval)
+
+    assert (
+        kernel.accept_approval(
+            tenant_id=awaiting.request["tenant_id"],
+            request_id=awaiting.request["request_id"],
+            approval=approval,
+        ).state
+        is KernelLifecycle.APPROVED
+    )
 
 
 def test_submit_is_idempotent_without_appending_duplicate_evidence(
@@ -193,6 +329,66 @@ def test_expired_identity_fails_closed(
 
     with pytest.raises(IdentityError, match="expired"):
         kernel.submit(actor_context=records["actor_context"], tool_request=records["tool_request"])
+
+
+def test_future_request_fails_before_policy_evidence_or_state(
+    records: dict[str, dict[str, Any]], verifier: Any, trust_factory: Any
+) -> None:
+    kernel = _kernel(verifier, trust_factory)
+    records["tool_request"]["requested_at"] = "2026-01-01T00:12:00.001Z"
+    apply_object_digest(records["tool_request"])
+
+    with pytest.raises(IdentityError, match="future"):
+        kernel.submit(actor_context=records["actor_context"], tool_request=records["tool_request"])
+    assert kernel.events(actor_context=records["actor_context"]) == ()
+    with pytest.raises(LifecycleError):
+        kernel.get(
+            actor_context=records["actor_context"],
+            request_id=records["tool_request"]["request_id"],
+        )
+
+
+@pytest.mark.parametrize("requested_at", ["2026-01-01T00:12:00.000Z", "2026-01-01T00:08:00.000Z"])
+@pytest.mark.parametrize(
+    ("decision", "expected_state"),
+    [
+        ("authorize", KernelLifecycle.POLICY_AUTHORIZED),
+        ("require_approval", KernelLifecycle.APPROVAL_REQUIRED),
+    ],
+)
+def test_current_and_past_requests_produce_non_predating_policy_decisions(
+    requested_at: str,
+    decision: str,
+    expected_state: KernelLifecycle,
+    records: dict[str, dict[str, Any]],
+    verifier: Any,
+    trust_factory: Any,
+) -> None:
+    records["tool_request"]["requested_at"] = requested_at
+    apply_object_digest(records["tool_request"])
+    kernel = GovernanceKernel(
+        policy=PolicySet(
+            rules=(
+                PolicyRule(
+                    rule_id=f"effects.chronology.{decision}.v1",
+                    decision=decision,
+                    effect_classes=frozenset({"write_external"}),
+                    isolation_profile="none",
+                ),
+            )
+        ),
+        identity_verifier=RecordingIdentityVerifier(),
+        approval_verifier=verifier,
+        approval_trust=lambda now: trust_factory(now=now),
+        clock=lambda: NOW,
+    )
+
+    result = kernel.submit(
+        actor_context=records["actor_context"], tool_request=records["tool_request"]
+    )
+    assert result.state is expected_state
+    assert result.policy["decided_at"] == "2026-01-01T00:12:00.000Z"
+    assert result.policy["decided_at"] >= result.request["requested_at"]
 
 
 def test_mismatched_or_replayed_approval_never_advances_lifecycle(
@@ -351,12 +547,14 @@ def test_authorize_policy_records_non_executable_policy_authorization(
 
 @pytest.mark.parametrize("decision", ["authorize", "require_approval"])
 def test_executable_policy_dispositions_require_a_grant_compatible_profile(decision: str) -> None:
-    with pytest.raises(PolicyConfigurationError, match="executable isolation profile"):
-        PolicyRule(
-            rule_id="effects.invalid_profile.v1",
-            decision=decision,
-            effect_classes=frozenset({"write_external"}),
-        )
+    for isolation_profile in ("no_effect", "unsupported"):
+        with pytest.raises(PolicyConfigurationError, match="executable isolation profile"):
+            PolicyRule(
+                rule_id="effects.invalid_profile.v1",
+                decision=decision,
+                effect_classes=frozenset({"write_external"}),
+                isolation_profile=isolation_profile,
+            )
     with pytest.raises(PolicyConfigurationError, match="deny rules"):
         PolicyRule(
             rule_id="effects.invalid_deny.v1",
@@ -364,6 +562,67 @@ def test_executable_policy_dispositions_require_a_grant_compatible_profile(decis
             effect_classes=frozenset({"write_external"}),
             isolation_profile="container",
         )
+
+
+@pytest.mark.parametrize(
+    ("decision", "expected_state"),
+    [
+        ("authorize", KernelLifecycle.POLICY_AUTHORIZED),
+        ("require_approval", KernelLifecycle.APPROVAL_REQUIRED),
+    ],
+)
+def test_none_isolation_profile_is_schema_and_grant_compatible(
+    decision: str,
+    expected_state: KernelLifecycle,
+    records: dict[str, dict[str, Any]],
+    verifier: Any,
+    trust_factory: Any,
+) -> None:
+    kernel = GovernanceKernel(
+        policy=PolicySet(
+            rules=(
+                PolicyRule(
+                    rule_id=f"effects.none.{decision}.v1",
+                    decision=decision,
+                    effect_classes=frozenset({"write_external"}),
+                    isolation_profile="none",
+                ),
+            )
+        ),
+        identity_verifier=RecordingIdentityVerifier(),
+        approval_verifier=verifier,
+        approval_trust=lambda now: trust_factory(now=now),
+        clock=lambda: NOW,
+    )
+    result = kernel.submit(
+        actor_context=records["actor_context"], tool_request=records["tool_request"]
+    )
+    assert result.state is expected_state
+    assert result.policy["isolation_profile"] == "none"
+    assert result.policy["decided_at"] >= result.request["requested_at"]
+
+    approvals: list[dict[str, Any]] = []
+    approval = None
+    if decision == "require_approval":
+        approval = _bound_approval(
+            records["approval_record"],
+            policy=dict(result.policy),
+            request=dict(result.request),
+        )
+        approval["constraints"] = []
+        apply_object_digest(approval)
+        approvals.append(approval)
+    grant = _grant_for_result(records["authorization_grant"], result, approval=approval)
+    AuthorizationGrant(grant, expected_tenant=result.request["tenant_id"])
+    validate_grant_binding(
+        grant,
+        result.request,
+        result.policy,
+        approvals,
+        constraint_registry=ConstraintRegistry({}),
+        verifier=verifier,
+        trust=trust_factory(now=NOW),
+    )
 
 
 def test_policy_authorization_and_approval_preserve_grant_binding_isolation_profiles(
@@ -514,20 +773,62 @@ def test_tenant_and_actor_scoped_reads_require_current_trusted_identity(
     )
     other_actor = copy.deepcopy(records["actor_context"])
     other_actor["actor_id"] = "018f0000-0000-7000-8000-000000000777"
-    with pytest.raises(IdentityError, match="another actor"):
-        kernel.get(actor_context=other_actor, request_id=submitted.request["request_id"])
+    errors = []
+    for scoped_actor, request_id in (
+        (other_actor, submitted.request["request_id"]),
+        (records["actor_context"], "018f0000-0000-7000-8000-000000000778"),
+    ):
+        with pytest.raises(LifecycleError) as exc_info:
+            kernel.get(actor_context=scoped_actor, request_id=request_id)
+        errors.append((type(exc_info.value), str(exc_info.value)))
+    assert errors[0] == errors[1]
     assert kernel.events(actor_context=other_actor) == ()
     other_tenant = _other_tenant(copy.deepcopy(records["actor_context"]))
-    with pytest.raises(LifecycleError, match="unknown tenant"):
+    with pytest.raises(LifecycleError, match="actor-scoped request not found"):
         kernel.get(actor_context=other_tenant, request_id=submitted.request["request_id"])
     expired = copy.deepcopy(records["actor_context"])
     expired["expires_at"] = "2026-01-01T00:11:00.000Z"
     with pytest.raises(IdentityError, match="expired"):
         kernel.events(actor_context=expired)
+    future_issued = copy.deepcopy(records["actor_context"])
+    future_issued["issued_at"] = "2026-01-01T00:12:00.001Z"
+    apply_object_digest(future_issued)
+    with pytest.raises(IdentityError, match="not currently valid"):
+        kernel.get(actor_context=future_issued, request_id=submitted.request["request_id"])
     untrusted = RecordingIdentityVerifier(accepted=False)
     blocked = _kernel(verifier, trust_factory, untrusted)
     with pytest.raises(IdentityError, match="not trusted"):
         blocked.events(actor_context=records["actor_context"])
+
+
+def test_actor_event_partition_hides_other_actor_evidence_content(
+    records: dict[str, dict[str, Any]], verifier: Any, trust_factory: Any
+) -> None:
+    kernel = _kernel(verifier, trust_factory)
+    first_actor = records["actor_context"]
+    first_request = records["tool_request"]
+    kernel.submit(actor_context=first_actor, tool_request=first_request)
+
+    second_actor = copy.deepcopy(first_actor)
+    second_actor["actor_id"] = "018f0000-0000-7000-8000-000000000777"
+    apply_object_digest(second_actor)
+    second_request = copy.deepcopy(first_request)
+    second_request["actor_id"] = second_actor["actor_id"]
+    second_request["actor_context_digest"] = sha256_digest(second_actor)
+    second_request["request_id"] = "018f0000-0000-7000-8000-000000000778"
+    second_request["idempotency"]["idempotency_key"] = "fixture.operation.actor2"
+    apply_object_digest(second_request)
+    kernel.submit(actor_context=second_actor, tool_request=second_request)
+
+    first_events = kernel.events(actor_context=first_actor)
+    second_events = kernel.events(actor_context=second_actor)
+    assert len(first_events) == len(second_events) == 1
+    assert {event["draft"]["inline_payload"]["actor_id"] for event in first_events} == {
+        first_actor["actor_id"]
+    }
+    assert {event["draft"]["inline_payload"]["actor_id"] for event in second_events} == {
+        second_actor["actor_id"]
+    }
 
 
 def test_replay_requires_the_exact_canonical_request_and_never_appends_evidence(
@@ -588,4 +889,31 @@ def test_concurrent_duplicate_submission_has_one_evidence_event(
             )
         )
     assert all(result.to_dict() == results[0].to_dict() for result in results)
+    assert len(kernel.events(actor_context=records["actor_context"])) == 1
+
+
+def test_concurrent_conflicting_replay_has_one_winner_and_one_evidence_event(
+    records: dict[str, dict[str, Any]], verifier: Any, trust_factory: Any
+) -> None:
+    kernel = _kernel(verifier, trust_factory)
+    original = records["tool_request"]
+    conflicting = copy.deepcopy(original)
+    conflicting["request_id"] = "018f0000-0000-7000-8000-000000000777"
+    conflicting["effect_classes"] = ["read_external"]
+    apply_object_digest(conflicting)
+
+    def submit(request: dict[str, Any]) -> tuple[str, str]:
+        try:
+            result = kernel.submit(actor_context=records["actor_context"], tool_request=request)
+        except IdempotencyConflictError as exc:
+            return "conflict", str(exc)
+        return "accepted", result.request["request_digest"]
+
+    submissions = [original, conflicting] * 4
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        outcomes = list(pool.map(submit, submissions))
+
+    accepted_digests = {value for status, value in outcomes if status == "accepted"}
+    assert len(accepted_digests) == 1
+    assert {status for status, _ in outcomes} == {"accepted", "conflict"}
     assert len(kernel.events(actor_context=records["actor_context"])) == 1
