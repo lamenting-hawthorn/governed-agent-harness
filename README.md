@@ -12,10 +12,12 @@ The project is runtime-neutral. It defines the trust boundaries required for
 governed agent execution without coupling the kernel to one model provider,
 transport, storage product, or learning workflow.
 
-> **Project status:** the canonical contract foundation is implemented and
-> tested. The runtime kernel and product integrations shown below are planned
-> layers, not claims about the current release. This repository is not yet a
-> production-ready agent platform.
+> **Project status:** the canonical contract foundation and a bounded,
+> in-process governance kernel are implemented and tested. The kernel accepts
+> identity only through an injected trust boundary, makes deterministic policy decisions, validates approvals against an injected current trust snapshot, and consumes approvals,
+> and appends in-memory evidence before lifecycle transitions. It does not issue
+> grants or execute effects. Durable state and product integrations remain
+> planned. This repository is not yet a production-ready agent platform.
 
 ## Why this exists
 
@@ -48,7 +50,7 @@ flowchart LR
   Semantic --> Tests
   Tests --> Wheel["Installable wheel\nverified outside source tree"]
 
-  Kernel["Runtime governance kernel"]:::planned
+  Kernel["Bounded governance kernel\nidentity + policy + approvals + evidence"]
   Effects["Effect broker + sandbox"]:::planned
   Storage["Durable runtime state"]:::planned
   Surfaces["CLI + SDK + HTTP/MCP"]:::planned
@@ -63,7 +65,8 @@ flowchart LR
 | Typed models and semantic validation | Implemented | 27-record model registry and cross-record tests |
 | Digest, trust, approval, and lifecycle bindings | Implemented | Positive, negative, and adversarial tests |
 | Isolated wheel packaging | Implemented | Clean-environment installation test |
-| Runtime kernel and effect broker | Planned | Requires end-to-end policy-before-effect proof |
+| Bounded in-process governance kernel | Implemented | Public-flow, negative-path, and adversarial lifecycle tests; no effect execution |
+| Effect broker and sandbox | Planned | Requires end-to-end policy-before-effect proof |
 | Durable runtime storage and governed memory | Planned | Requires restart, isolation, and recovery proof |
 | CLI, SDK, HTTP/MCP, and hosted operations | Planned | Requires feature-level integration evidence |
 
@@ -236,7 +239,7 @@ flowchart LR
 | Stage | Principal deliverables | Completion boundary |
 | --- | --- | --- |
 | Contract foundation | Schemas, validation, fixtures, packaging | Implemented and covered by the contract suite |
-| Governance kernel | Trusted identity, policy, approvals, lifecycle state | Authorization-binding and negative-path tests |
+| Governance kernel | In-process identity propagation through an injected trust boundary, deterministic policy, exact approval binding, in-memory evidence-first lifecycle state | Implemented without grant issuance or effect execution |
 | Governed effects | Engine boundary, effect broker, constrained executors | End-to-end policy-before-effect proof |
 | Durable state | Ledger, projections, memory, skills | Restart, replay, isolation, idempotency, and recovery tests |
 | Product surfaces | CLI, SDK, HTTP/MCP, diagnostics | Documented feature-level workflows through supported surfaces |

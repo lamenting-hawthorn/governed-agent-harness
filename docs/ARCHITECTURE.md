@@ -19,9 +19,10 @@ The architecture has three primary boundaries:
 
 ## Implementation status
 
-The current checkout implements the contract foundation only. The diagrams
-below intentionally separate shipped code from the target system so that
-architecture is not confused with runtime readiness.
+The current checkout implements the contract foundation plus a bounded,
+in-process governance kernel. The diagrams below intentionally separate that
+shipped kernel from the target system so architecture is not confused with
+runtime readiness.
 
 ### Current checkout
 
@@ -34,7 +35,7 @@ flowchart LR
   Package --> Wheel["Installable package / wheel"]
   Tests --> Evidence["Verified contract evidence"]
 
-  Runtime["Runtime kernel"]:::planned
+  Runtime["Bounded in-process kernel\nidentity, policy, approval, evidence"]
   Effects["Effect execution"]:::planned
   Storage["Durable runtime storage"]:::planned
   Adapters["Engine and transport adapters"]:::planned
@@ -48,7 +49,8 @@ flowchart LR
 | Python models, canonicalization, and validation | Implemented | `src/governed_agent_harness/contracts/` |
 | Positive, negative, compatibility, and adversarial fixtures | Implemented | `tests/contracts/` |
 | Packaging and isolated wheel verification | Implemented | `pyproject.toml` and tests |
-| Governance kernel and effect broker | Planned | Future runtime layer |
+| Bounded governance kernel | Implemented | `src/governed_agent_harness/kernel/`; injected identity and current approval trust, deterministic decisions, approval consumption, and in-memory evidence lifecycle |
+| Effect broker | Planned | Future runtime layer; no protected effect can execute in the current kernel |
 | CLI, SDK, HTTP/MCP surfaces | Planned | Future application layer |
 | Local/hosted durable storage | Planned | Future storage adapters |
 | Engine, sandbox, knowledge, and provider adapters | Planned | Future integration layer |

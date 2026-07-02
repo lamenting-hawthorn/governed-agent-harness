@@ -120,8 +120,11 @@ def test_offline_installed_wheel_smoke(tmp_path: Path) -> None:
 import governed_agent_harness.contracts as contracts
 from governed_agent_harness.contracts.positive_fixtures import build_positive_records
 from governed_agent_harness.contracts.self_check import run
+from governed_agent_harness.kernel import GovernanceKernel, PolicyRule, PolicySet
 
 assert len(contracts.DEFAULT_SCHEMA_STORE.catalog) == 27
+assert GovernanceKernel.__name__ == "GovernanceKernel"
+assert PolicySet((PolicyRule("effects.deny.v1", "deny", frozenset({"write_external"})),))
 record = build_positive_records()["actor_context"]
 contracts.DEFAULT_SCHEMA_STORE.validate_record(record, "actor_context")
 first = run()
