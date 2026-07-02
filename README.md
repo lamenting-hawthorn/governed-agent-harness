@@ -63,9 +63,10 @@ caller or execution engine
 ```
 
 The governance kernel owns authorization, evidence, memory promotion, and
-state transitions. Integrations remain outside the kernel and must use versioned
-contracts. The [architecture guide](docs/ARCHITECTURE.md) describes the full
-design and its invariants.
+state transitions. Integrations remain outside the kernel and must use
+versioned contracts. The [architecture guide](docs/ARCHITECTURE.md#implementation-status)
+shows the implemented contract foundation, the delivery path, and the completed
+target system as separate diagrams.
 
 ## Project relationship
 
@@ -77,7 +78,7 @@ and neither can bypass this repository's governance controls.
 
 ## Documentation
 
-- [Architecture](docs/ARCHITECTURE.md)
+- [Architecture: current and target state](docs/ARCHITECTURE.md#implementation-status)
 - [Contracts](docs/CONTRACTS.md)
 - [Security model](docs/SECURITY_MODEL.md)
 - [Threat model](docs/THREAT_MODEL.md)

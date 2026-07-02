@@ -39,7 +39,7 @@ flowchart LR
   Storage["Durable runtime storage"]:::planned
   Adapters["Engine and transport adapters"]:::planned
 
-  classDef planned stroke-dasharray: 5 5,fill:#fff7ed,stroke:#c2410c
+  classDef planned stroke-dasharray: 5 5
 ```
 
 | Surface | Status | Boundary |
@@ -114,7 +114,7 @@ flowchart TB
   Quarantine --> Skills
   Quarantine --> Memory
 
-  classDef external fill:#eef2ff,stroke:#4f46e5
+  classDef external stroke-dasharray: 2 2
   class SkillLoop,GAA external
 ```
 
@@ -128,6 +128,38 @@ surface -> identity -> validated request -> policy -> approval if required
 
 No execution engine, transport, provider, or learning system receives an
 alternate path around the policy decision, evidence ledger, or effect broker.
+
+### Delivery path
+
+The implementation sequence below connects the current contract foundation to
+the completed architecture. Arrows indicate dependency order, not release dates
+or a claim that a later stage has started.
+
+```mermaid
+flowchart LR
+  Foundation["1. Contract foundation\nschemas, validation, fixtures, packaging"]:::done
+  Kernel["2. Governance kernel\nidentity, policy, approvals, lifecycle"]:::planned
+  Effects["3. Governed effects\nbroker, engine adapter, sandbox, evidence"]:::planned
+  State["4. Durable state\nledger, projections, memory, skills"]:::planned
+  Surfaces["5. Product surfaces\nCLI, SDK, HTTP, MCP, diagnostics"]:::planned
+  Operations["6. Operations + integrations\nhosted tenancy, observability, recovery,\nSkillLoop and Governed Agent Architecture adapters"]:::planned
+  Release["7. Stable release\nconformance, security review, migration,\nSBOM, signed artifacts, support boundaries"]:::planned
+
+  Foundation --> Kernel --> Effects --> State --> Surfaces --> Operations --> Release
+
+  classDef done stroke-width:2px
+  classDef planned stroke-dasharray:5 5
+```
+
+| Stage | Principal deliverables | Completion evidence |
+| --- | --- | --- |
+| Contract foundation | Schemas, canonicalization, semantic validation, fixtures, wheel | Implemented and covered by the contract suite |
+| Governance kernel | Trusted identity, authorization, policy, approvals, lifecycle state | Negative-path and authorization-binding tests |
+| Governed effects | Replaceable engine boundary, effect broker, constrained executors | End-to-end proof that policy runs before every declared effect |
+| Durable state | Evidence ledger, projections, governed memory, skill lifecycle | Restart, idempotency, replay, isolation, and recovery tests |
+| Product surfaces | CLI, SDK, HTTP/MCP, diagnostics, run inspection | One documented workflow through every supported surface |
+| Operations and integrations | Hosted storage, tenant controls, telemetry, backup/restore, optional adapters | Cross-backend conformance and operational exercises |
+| Stable release | Compatibility policy, migrations, security review, SBOM, signed artifacts | Published release evidence and explicit support boundaries |
 
 ## Design invariants
 
