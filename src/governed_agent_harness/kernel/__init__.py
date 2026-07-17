@@ -17,6 +17,7 @@ from .effects import (
     EffectExecutor,
     ExecutorCapabilities,
 )
+from governed_agent_harness.persistence import PreparedExecutionError
 
 __all__ = [
     "GovernanceKernel",
@@ -32,4 +33,5 @@ __all__ = [
     "PolicyConfigurationError",
     "PolicyRule",
     "PolicySet",
+    "PreparedExecutionError",
 ]

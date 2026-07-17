@@ -27,6 +27,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
+      - name: Install PostgreSQL server tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql
+          echo "$(dirname "$(find /usr/lib/postgresql -type f -name pg_ctl | head -1)")" >> "$GITHUB_PATH"
+
       - name: Install test dependencies
         run: python -m pip install -e '.[test]'
 
@@ -34,7 +40,7 @@ jobs:
         run: ruff check .
 
       - name: Run tests
-        run: pytest -q
+        run: GAH_REQUIRE_POSTGRES=1 pytest -q
 
       - name: Check patch hygiene
         run: git diff --check

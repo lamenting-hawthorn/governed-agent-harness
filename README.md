@@ -17,10 +17,13 @@ transport, storage product, or learning workflow.
 > identity only through an injected trust boundary, makes deterministic policy
 > decisions, validates and consumes approvals, issues exact-binding five-minute
 > authorization grants, and routes the implemented synthetic effect path through
-> one evidence-first broker. The executor is injected and in-process;
-> `isolation_profile="none"` is not a sandbox. Durable state, provider effects,
-> transports, and product integrations remain planned. This repository is not
-> yet a production-ready agent platform.
+> one evidence-first broker. An optional PostgreSQL-backed Phase 4 store now
+> durably commits effect intent and exact grant consumption, records validated
+> outcomes, supports terminal replay after restart, and requires explicit
+> recovery for prepared-without-outcome executions. The deterministic executor
+> remains injected and synthetic; `isolation_profile="none"` is not a sandbox.
+> Pre-effect lifecycle projections, provider effects, transports, and hosted
+> operations remain out of scope. This repository is not production-ready.
 
 ## Why this exists
 
@@ -71,7 +74,8 @@ flowchart LR
 | Bounded in-process governance kernel | Implemented | Public-flow, negative-path, and adversarial lifecycle tests |
 | Bounded governed effects | Implemented | Exact signed grant, one broker, intent-before-executor evidence, outcome evidence, replay/concurrency proof, and a reversible synthetic executor only |
 | Sandbox and provider executors | Planned | Requires independently proved isolation and provider-specific enforcement |
-| Durable runtime storage and governed memory | Planned | Requires restart, isolation, and recovery proof |
+| PostgreSQL durable effect authority/evidence | Implemented, bounded | Real PostgreSQL RLS, atomic prepare/consume, replay, concurrency, and recovery tests; pre-effect lifecycle persistence remains out of scope |
+| Durable runtime storage and governed memory | Planned | Requires broader restart, isolation, and recovery proof |
 | CLI, SDK, HTTP/MCP, and hosted operations | Planned | Requires feature-level integration evidence |
 
 ## Contract foundation
@@ -261,6 +265,7 @@ acceptance evidence exist. The detailed path lives in the
 contracts/v1/                         canonical JSON Schema authority
 src/governed_agent_harness/contracts/ Python models and validators
 src/governed_agent_harness/kernel/    bounded in-process governance lifecycle
+src/governed_agent_harness/persistence/ optional PostgreSQL effect authority/evidence
 tests/contracts/                      deterministic and adversarial evidence
 tests/e2e/                            public governed-effects flow proof
 tests/kernel/                         public-flow and adversarial kernel coverage
@@ -279,9 +284,13 @@ exists. In particular:
 - signed-record helpers require a deployment-supplied proof verifier and trust
   policy;
 - local contract tests do not prove hosted tenant isolation;
-- sandboxing, secret brokerage, provider effects, durable effect/outcome
-  atomicity, and hosted runtime enforcement remain planned implementation
-  layers; and
+- the PostgreSQL application role is read-only and backend-only; authoritative
+  transitions use a separate owner connection held by the adapter, so direct
+  SQL cannot forge grants or outcomes;
+- prepared-without-outcome recovery requires an explicit dispatch-owner-abandoned
+  confirmation and records `indeterminate`; the slice does not infer liveness;
+- sandboxing, secret brokerage, provider effects, broader durable runtime state,
+  and hosted runtime enforcement remain planned implementation layers; and
 - compliance or certification claims require deployment-specific evidence and
   independent review.
 

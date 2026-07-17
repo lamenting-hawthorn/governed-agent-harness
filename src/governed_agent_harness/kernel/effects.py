@@ -29,6 +29,12 @@ from governed_agent_harness.contracts import (
     validate_grant_binding,
     validate_scope_narrowing,
 )
+from governed_agent_harness.persistence import (
+    DurableEffectStore,
+    PreparedExecutionError,
+    StoredEffectExecution,
+    execution_binding_digest,
+)
 
 
 class EffectConfigurationError(SemanticError):
@@ -143,6 +149,7 @@ class EffectBroker:
         evidence: EvidenceAppender,
         clock: Callable[[], datetime],
         ids: Callable[[], str],
+        durable_store: DurableEffectStore | None = None,
     ) -> None:
         self._executor = executor
         self._constraint_registry = constraint_registry
@@ -151,9 +158,16 @@ class EffectBroker:
         self._evidence = evidence
         self._clock = clock
         self._ids = ids
+        self._durable_store = durable_store
         self._lock = threading.RLock()
         self._consumed_grants: set[tuple[str, str, str]] = set()
         self._results: dict[tuple[str, str], _StoredExecution] = {}
+
+    @property
+    def durable_store(self) -> DurableEffectStore | None:
+        """Expose the narrow persistence port for kernel recovery only."""
+
+        return self._durable_store
 
     def validate_capabilities(
         self,
@@ -193,6 +207,14 @@ class EffectBroker:
         grant = AuthorizationGrant(
             authorization_grant, expected_tenant=actor["tenant_id"]
         ).to_dict()
+        if self._durable_store is not None:
+            return self._dispatch_durable(
+                actor=actor,
+                request=parsed_request,
+                policy=parsed_policy,
+                approvals=parsed_approvals,
+                grant=grant,
+            )
         self._validate_authority(
             actor=actor,
             request=parsed_request,
@@ -296,6 +318,201 @@ class EffectBroker:
                 execution=execution,
             )
             return execution.snapshot()
+
+    def recover(
+        self,
+        *,
+        actor_context: Mapping[str, Any],
+        request_id: str,
+        confirm_dispatch_owner_abandoned: bool = False,
+    ) -> BrokerExecution:
+        """Explicitly reconcile one committed preparation without invoking an executor."""
+
+        if self._durable_store is None:
+            raise EffectConfigurationError("durable effect recovery requires a durable store")
+        if not confirm_dispatch_owner_abandoned:
+            raise PreparedExecutionError(
+                "recovery requires an explicit dispatch-owner-abandoned confirmation"
+            )
+        actor = ActorContext(actor_context).to_dict()
+        stored = self._durable_store.lookup(actor_context=actor, request_id=request_id)
+        if stored is None:
+            raise EffectConfigurationError("durable execution was not found for recovery")
+        self._validate_stored_scope(actor, stored)
+        if stored.state in {"completed", "indeterminate"}:
+            return self._stored_execution(stored, replayed=True)
+        outcome = self._build_outcome(
+            actor=stored.actor_context,
+            request=stored.request,
+            policy=stored.policy,
+            approvals=stored.approvals,
+            grant=stored.grant,
+            intent=stored.intent_evidence,
+            status="indeterminate",
+            result_payload={"error": "prepared_execution_outcome_unknown"},
+        )
+        policy_ref = _record_ref(
+            "policy_decision", stored.policy["decision_id"], stored.policy["decision_digest"]
+        )
+        completed = self._durable_store.complete(
+            actor_context=actor,
+            request_id=request_id,
+            expected_version=stored.version,
+            outcome=outcome,
+            policy_ref=policy_ref,
+            outcome_payload={
+                "actor_id": actor["actor_id"],
+                "request_digest": stored.request["request_digest"],
+                "authorization_grant_digest": sha256_digest(stored.grant),
+                "outcome_digest": outcome["outcome_digest"],
+                "status": "indeterminate",
+                "recovery": "explicit",
+            },
+            state="indeterminate",
+        )
+        return self._stored_execution(completed, replayed=True)
+
+    def _dispatch_durable(
+        self,
+        *,
+        actor: Mapping[str, Any],
+        request: Mapping[str, Any],
+        policy: Mapping[str, Any],
+        approvals: tuple[Mapping[str, Any], ...],
+        grant: Mapping[str, Any],
+    ) -> BrokerExecution:
+        existing = self._durable_store.lookup(actor_context=actor, request_id=request["request_id"])
+        if existing is not None:
+            expected_binding = execution_binding_digest(
+                actor_context=actor,
+                request=request,
+                policy=policy,
+                approvals=approvals,
+                grant=grant,
+            )
+            if existing.binding_digest != expected_binding:
+                raise IdempotencyConflictError(
+                    "durable replay does not match the original governed bindings"
+                )
+            if existing.state in {"completed", "indeterminate"}:
+                return self._stored_execution(existing, replayed=True)
+            raise PreparedExecutionError(
+                "effect preparation exists without an outcome; explicit recovery is required"
+            )
+
+        self._validate_authority(
+            actor=actor,
+            request=request,
+            policy=policy,
+            approvals=approvals,
+            grant=grant,
+        )
+        self._executor.capabilities.validate(request=request, authorization_grant=grant)
+        policy_ref = _record_ref(
+            "policy_decision", policy["decision_id"], policy["decision_digest"]
+        )
+        prepared = self._durable_store.prepare(
+            actor_context=actor,
+            request=request,
+            policy=policy,
+            approvals=approvals,
+            grant=grant,
+            policy_ref=policy_ref,
+            intent_payload={
+                "actor_id": grant["actor_id"],
+                "request_digest": grant["request_digest"],
+                "policy_decision_digest": grant["policy_decision_digest"],
+                "authorization_grant_digest": sha256_digest(grant),
+                "effect_classes": copy.deepcopy(request["effect_classes"]),
+                "isolation_profile": grant["isolation_profile"],
+            },
+        )
+        if not prepared.created:
+            if prepared.state in {"completed", "indeterminate"}:
+                return self._stored_execution(prepared, replayed=True)
+            raise PreparedExecutionError(
+                "effect preparation exists without an outcome; explicit recovery is required"
+            )
+        status, result_payload, effect_active = self._invoke_executor(request, grant)
+        outcome: dict[str, Any] | None = None
+        try:
+            outcome = self._build_outcome(
+                actor=actor,
+                request=request,
+                policy=policy,
+                approvals=approvals,
+                grant=grant,
+                intent=prepared.intent_evidence,
+                status=status,
+                result_payload=result_payload,
+            )
+            completed = self._durable_store.complete(
+                actor_context=actor,
+                request_id=request["request_id"],
+                expected_version=prepared.version,
+                outcome=outcome,
+                policy_ref=policy_ref,
+                outcome_payload={
+                    "actor_id": grant["actor_id"],
+                    "request_digest": grant["request_digest"],
+                    "authorization_grant_digest": sha256_digest(grant),
+                    "outcome_digest": outcome["outcome_digest"],
+                    "status": outcome["status"],
+                },
+                state="completed" if status == "succeeded" else "indeterminate",
+            )
+        except Exception:
+            if outcome is None:
+                if effect_active:
+                    self._revert_synthetic(request, grant, result_payload)
+                raise
+            try:
+                reconciled = self._durable_store.lookup(
+                    actor_context=actor, request_id=request["request_id"]
+                )
+            except Exception as reconcile_error:
+                raise EffectConfigurationError(
+                    "durable outcome acknowledgement is uncertain; effect must not be retried"
+                ) from reconcile_error
+            if reconciled is not None and reconciled.state in {"completed", "indeterminate"}:
+                if reconciled.outcome != outcome:
+                    raise EffectConfigurationError(
+                        "durable outcome acknowledgement conflicts with stored terminal result"
+                    )
+                return self._stored_execution(reconciled, replayed=True)
+            if effect_active:
+                self._revert_synthetic(request, grant, result_payload)
+            raise
+        return self._stored_execution(completed)
+
+    @staticmethod
+    def _validate_stored_scope(actor: Mapping[str, Any], stored: StoredEffectExecution) -> None:
+        if actor != stored.actor_context:
+            raise EffectConfigurationError(
+                "recovery actor context does not exactly match preparation"
+            )
+        if stored.request["actor_context_digest"] != sha256_digest(actor):
+            raise EffectConfigurationError("stored preparation does not bind actor context")
+        if (
+            stored.request["tenant_id"] != actor["tenant_id"]
+            or stored.request["actor_id"] != actor["actor_id"]
+            or stored.grant["tenant_id"] != actor["tenant_id"]
+            or stored.grant["actor_id"] != actor["actor_id"]
+        ):
+            raise EffectConfigurationError("stored preparation scope is invalid")
+
+    @staticmethod
+    def _stored_execution(
+        stored: StoredEffectExecution, *, replayed: bool = False
+    ) -> BrokerExecution:
+        if stored.outcome is None or stored.outcome_evidence is None:
+            raise PreparedExecutionError("durable execution has no terminal outcome")
+        return BrokerExecution(
+            stored.outcome,
+            stored.intent_evidence,
+            stored.outcome_evidence,
+            replayed=replayed,
+        ).snapshot()
 
     def _validate_authority(
         self,

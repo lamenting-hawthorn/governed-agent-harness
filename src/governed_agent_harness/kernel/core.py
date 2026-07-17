@@ -34,6 +34,7 @@ from governed_agent_harness.contracts import (
     validate_grant_binding,
     verify_signed_record,
 )
+from governed_agent_harness.persistence import DurableEffectStore, PreparedExecutionError
 
 from .effects import (
     AuthorizationGrantIssuer,
@@ -303,6 +304,7 @@ class GovernanceKernel:
         ids: IdFactory | None = None,
         nonce_factory: Callable[[], str] | None = None,
         evidence_ledger: InMemoryEvidenceLedger | None = None,
+        durable_store: DurableEffectStore | None = None,
     ) -> None:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._ids = ids or _Uuid7Factory(self._clock)
@@ -315,7 +317,11 @@ class GovernanceKernel:
         self._grant_trust_factory = grant_trust
         self._constraint_registry = constraint_registry or ConstraintRegistry({})
         self._nonce_factory = nonce_factory or (lambda: secrets.token_urlsafe(18))
-        self._ledger = evidence_ledger or InMemoryEvidenceLedger(clock=self._clock, ids=self._ids)
+        self._ledger = evidence_ledger or (
+            durable_store
+            if durable_store is not None and hasattr(durable_store, "append")
+            else InMemoryEvidenceLedger(clock=self._clock, ids=self._ids)
+        )
         self._broker = (
             EffectBroker(
                 executor=executor,
@@ -325,6 +331,7 @@ class GovernanceKernel:
                 evidence=self._ledger,
                 clock=self._clock,
                 ids=self._ids,
+                durable_store=durable_store,
             )
             if executor is not None and grant_verifier is not None and grant_trust is not None
             else None
@@ -472,6 +479,7 @@ class GovernanceKernel:
                 payload={
                     "actor_id": current.request["actor_id"],
                     "request_digest": current.request["request_digest"],
+                    "policy_decision_digest": current.policy["decision_digest"],
                     "approval_digest": parsed["approval_digest"],
                     "next_state": KernelLifecycle.APPROVED.value,
                 },
@@ -508,6 +516,38 @@ class GovernanceKernel:
         with self._lock:
             key = (actor["tenant_id"], request_id)
             current = self._records.get(key)
+            if (
+                current is None
+                and self._broker is not None
+                and self._broker.durable_store is not None
+            ):
+                stored = self._broker.durable_store.lookup(
+                    actor_context=actor, request_id=request_id
+                )
+                if stored is not None:
+                    if stored.state == "prepared":
+                        raise PreparedExecutionError(
+                            "effect preparation exists without an outcome; explicit recovery is required"
+                        )
+                    if stored.outcome is None or stored.outcome_evidence is None:
+                        raise LifecycleError("durable terminal execution has incomplete evidence")
+                    durable_evidence = self._broker.durable_store.events(
+                        actor_context=actor, run_id=stored.request["run_id"]
+                    )
+                    current = LifecycleRecord(
+                        request=stored.request,
+                        policy=stored.policy,
+                        state=(
+                            KernelLifecycle.EFFECT_SUCCEEDED
+                            if stored.outcome["status"] == "succeeded"
+                            else KernelLifecycle.EFFECT_INDETERMINATE
+                        ),
+                        evidence=durable_evidence,
+                        approval=stored.approvals[0] if stored.approvals else None,
+                        grant=stored.grant,
+                        outcome=stored.outcome,
+                    )
+                    self._records[key] = current
             if current is None or current.request["actor_id"] != actor["actor_id"]:
                 raise LifecycleError("actor-scoped request not found")
             self._validate_identity(actor, current.request)
@@ -560,6 +600,72 @@ class GovernanceKernel:
                 outcome=execution.outcome,
             )
             self._records[key] = advanced
+            return _snapshot(advanced)
+
+    def recover_effect(
+        self,
+        *,
+        actor_context: Mapping[str, Any],
+        request_id: str,
+        confirm_dispatch_owner_abandoned: bool = False,
+    ) -> LifecycleRecord:
+        """Reconcile a durable prepared effect without invoking the executor."""
+
+        actor = ActorContext(actor_context).to_dict()
+        self._validate_actor(actor)
+        with self._lock:
+            if self._broker is None:
+                raise EffectConfigurationError("effect broker requires a durable store")
+            execution = self._broker.recover(
+                actor_context=actor,
+                request_id=request_id,
+                confirm_dispatch_owner_abandoned=confirm_dispatch_owner_abandoned,
+            )
+            current = self._records.get((actor["tenant_id"], request_id))
+            if current is not None:
+                if current.state in {
+                    KernelLifecycle.EFFECT_SUCCEEDED,
+                    KernelLifecycle.EFFECT_INDETERMINATE,
+                }:
+                    return _snapshot(current)
+                base = current
+                evidence = (
+                    *current.evidence,
+                    execution.intent_evidence,
+                    execution.outcome_evidence,
+                )
+            else:
+                durable_store = self._broker.durable_store
+                if durable_store is None:
+                    raise EffectConfigurationError("effect broker has no durable store")
+                stored = durable_store.lookup(actor_context=actor, request_id=request_id)
+                if stored is None:
+                    raise LifecycleError("durable execution was not found for recovery")
+                base = LifecycleRecord(
+                    request=stored.request,
+                    policy=stored.policy,
+                    state=KernelLifecycle.GRANT_ISSUED,
+                    evidence=(),
+                    approval=stored.approvals[0] if stored.approvals else None,
+                    grant=stored.grant,
+                )
+                evidence = durable_store.events(
+                    actor_context=actor, run_id=stored.request["run_id"]
+                )
+            advanced = LifecycleRecord(
+                request=base.request,
+                policy=base.policy,
+                state=(
+                    KernelLifecycle.EFFECT_SUCCEEDED
+                    if execution.outcome["status"] == "succeeded"
+                    else KernelLifecycle.EFFECT_INDETERMINATE
+                ),
+                evidence=evidence,
+                approval=base.approval,
+                grant=base.grant,
+                outcome=execution.outcome,
+            )
+            self._records[(actor["tenant_id"], request_id)] = advanced
             return _snapshot(advanced)
 
     def _issue_grant_locked(
@@ -700,6 +806,8 @@ class GovernanceKernel:
         """Read actor-scoped tenant evidence only after trusted identity verification."""
 
         actor = self._validated_actor(actor_context)
+        if self._broker is not None and self._broker.durable_store is not None:
+            return self._broker.durable_store.events(actor_context=actor)
         return self._ledger._events_for_actor(actor["tenant_id"], actor["actor_id"])
 
     def _validate_identity(self, actor: Mapping[str, Any], request: Mapping[str, Any]) -> datetime:

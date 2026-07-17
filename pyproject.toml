@@ -24,8 +24,12 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+postgres = [
+    "psycopg>=3.2,<4",
+]
 test = [
     "build>=1.2,<2",
+    "psycopg[binary]>=3.2,<4",
     "pytest>=8,<9",
     "ruff>=0.12,<1",
     "setuptools>=68,<81",
@@ -37,6 +41,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "governed_agent_harness.contracts" = ["schemas/v1/*.json"]
+"governed_agent_harness.persistence" = ["migrations/*.sql"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
