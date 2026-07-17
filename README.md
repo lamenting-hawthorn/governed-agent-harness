@@ -18,11 +18,13 @@ transport, storage product, or learning workflow.
 > decisions, validates and consumes approvals, issues exact-binding five-minute
 > authorization grants, and routes the implemented synthetic effect path through
 > one evidence-first broker. An optional PostgreSQL-backed Phase 4 store now
-> durably commits effect intent and exact grant consumption, records validated
-> outcomes, supports terminal replay after restart, and requires explicit
-> recovery for prepared-without-outcome executions. The deterministic executor
+> durably records the governed pre-effect lifecycle, commits effect intent and
+> exact grant consumption, records validated outcomes, and reconstructs state
+> after restart. Checksummed migrations fail closed on drift. Fenced execution
+> attempts use database leases and permit indeterminate recovery only after
+> expiry; stale owners cannot append terminal evidence. The deterministic executor
 > remains injected and synthetic; `isolation_profile="none"` is not a sandbox.
-> Pre-effect lifecycle projections, provider effects, transports, and hosted
+> Provider effects, transports, general sandboxing, and hosted
 > operations remain out of scope. This repository is not production-ready.
 
 ## Why this exists
@@ -58,7 +60,7 @@ flowchart LR
 
   Kernel["Bounded governance kernel\nidentity + policy + approvals + evidence"]
   Effects["Bounded effect broker\nreversible synthetic executor"]
-  Storage["Durable runtime state"]:::planned
+  Storage["Bounded PostgreSQL lifecycle + effects"]
   Surfaces["CLI + SDK + HTTP/MCP"]:::planned
 
   classDef planned stroke-dasharray:5 5
@@ -74,7 +76,7 @@ flowchart LR
 | Bounded in-process governance kernel | Implemented | Public-flow, negative-path, and adversarial lifecycle tests |
 | Bounded governed effects | Implemented | Exact signed grant, one broker, intent-before-executor evidence, outcome evidence, replay/concurrency proof, and a reversible synthetic executor only |
 | Sandbox and provider executors | Planned | Requires independently proved isolation and provider-specific enforcement |
-| PostgreSQL durable effect authority/evidence | Implemented, bounded | Real PostgreSQL RLS, atomic prepare/consume, replay, concurrency, and recovery tests; pre-effect lifecycle persistence remains out of scope |
+| PostgreSQL governed lifecycle/effect authority | Implemented, bounded | Checksummed migrations, canonical lifecycle evidence, rebuildable projection, runtime-role/RLS tests, atomic prepare/consume, fenced leases, replay, restart, concurrency, and expired-lease recovery |
 | Durable runtime storage and governed memory | Planned | Requires broader restart, isolation, and recovery proof |
 | CLI, SDK, HTTP/MCP, and hosted operations | Planned | Requires feature-level integration evidence |
 
@@ -284,15 +286,28 @@ exists. In particular:
 - signed-record helpers require a deployment-supplied proof verifier and trust
   policy;
 - local contract tests do not prove hosted tenant isolation;
-- the PostgreSQL application role is read-only and backend-only; authoritative
-  transitions use a separate owner connection held by the adapter, so direct
-  SQL cannot forge grants or outcomes;
-- prepared-without-outcome recovery requires an explicit dispatch-owner-abandoned
-  confirmation and records `indeterminate`; the slice does not infer liveness;
+- PostgreSQL uses separate `NOLOGIN` owner, runtime-reader, and authority-writer
+  roles. The runtime reader has no table DML, migration, or transition authority;
+  a distinct non-superuser credential invokes narrow transition entry points;
+- the ledger is authoritative for governed request, policy, approval, grant,
+  intent, and outcome evidence; the lifecycle table is checked and rebuildable;
+- prepared/executing recovery is authorized only by an expired database lease
+  and an atomic fencing CAS, and always records `indeterminate` without retry;
 - sandboxing, secret brokerage, provider effects, broader durable runtime state,
   and hosted runtime enforcement remain planned implementation layers; and
 - compliance or certification claims require deployment-specific evidence and
   independent review.
+
+PostgreSQL installation currently fails closed unless `current_schema()` is
+`public`. Operators must explicitly grant one login `gah_runtime`, grant a
+different login `gah_authority_writer`, and provision both logins to the same
+validated actor with `PostgresDurableEffectStore.provision_principal(...)`.
+Each database login maps to exactly one tenant/actor pair. Store construction
+requires both `connect` and `privileged_connect`; there is no fallback from the
+authority connection to the runtime connection. Migration and principal setup
+remain administrator-only operations. Installation rejects reserved, non-login,
+privileged, identical, or transitively connected service roles before granting
+either group membership.
 
 Read the [security model](docs/SECURITY_MODEL.md),
 [threat model](docs/THREAT_MODEL.md), and [security reporting policy](SECURITY.md)

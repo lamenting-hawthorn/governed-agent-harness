@@ -72,6 +72,8 @@ def test_postgres_prepare_complete_replay_and_per_run_sequence(postgres_connecti
             "authorization_grant_digest": sha256_digest(grant),
         },
         state="completed",
+        execution_attempt_id=prepared.execution_attempt_id,
+        owner_generation=prepared.owner_generation,
     )
     assert completed.state == "completed"
     replay = store.lookup(actor_context=actor, request_id=request["request_id"])
@@ -87,6 +89,8 @@ def test_postgres_prepare_complete_replay_and_per_run_sequence(postgres_connecti
             policy_ref=policy_ref,
             outcome_payload={"status": "succeeded"},
             state="completed",
+            execution_attempt_id=prepared.execution_attempt_id,
+            owner_generation=prepared.owner_generation,
         )
 
 
@@ -108,7 +112,8 @@ def test_postgres_forced_rls_hides_other_tenant(postgres_connections):
     )
     other = copy.deepcopy(actor)
     other["tenant_id"] = "018f0000-0000-7000-8000-000000000099"
-    assert store.lookup(actor_context=other, request_id=request["request_id"]) is None
+    with pytest.raises(Exception, match="outside actor scope"):
+        store.lookup(actor_context=other, request_id=request["request_id"])
     with postgres_connections["app"]() as connection, connection.cursor() as cursor:
         with pytest.raises(Exception):
             cursor.execute("SELECT count(*) FROM gah_effect_executions")
@@ -161,6 +166,218 @@ def test_postgres_prepare_race_consumes_one_grant_and_one_intent(postgres_connec
         assert cursor.fetchone()[0] == 1
         cursor.execute("SELECT count(*) FROM gah_grant_consumptions")
         assert cursor.fetchone()[0] == 1
+
+
+def test_execution_lease_renewal_expiry_and_stale_owner_fence(postgres_connections):
+    store = postgres_connections["store"]()
+    actor, request, policy, approvals, grant = _inputs()
+    policy_ref = {
+        "record_type": "policy_decision",
+        "record_id": policy["decision_id"],
+        "record_digest": policy["decision_digest"],
+    }
+    prepared = store.prepare(
+        actor_context=actor,
+        request=request,
+        policy=policy,
+        approvals=approvals,
+        grant=grant,
+        policy_ref=policy_ref,
+        intent_payload=_intent_payload(actor, request, policy, grant),
+    )
+    renewed = store.renew_lease(
+        actor_context=actor,
+        request_id=request["request_id"],
+        execution_attempt_id=prepared.execution_attempt_id,
+        owner_generation=prepared.owner_generation,
+    )
+    assert renewed.state == "executing"
+    assert renewed.last_renewed_at >= prepared.last_renewed_at
+    indeterminate = _outcome(
+        prepared, policy, request, actor, grant, approvals, status="indeterminate"
+    )
+    recovery_payload = {
+        "actor_id": actor["actor_id"],
+        "request_digest": request["request_digest"],
+        "authorization_grant_digest": sha256_digest(grant),
+        "outcome_digest": indeterminate["outcome_digest"],
+        "status": "indeterminate",
+        "recovery": "lease_expired",
+    }
+    with pytest.raises(Exception, match="lease has not expired"):
+        store.recover_expired(
+            actor_context=actor,
+            request_id=request["request_id"],
+            outcome=indeterminate,
+            policy_ref=policy_ref,
+            outcome_payload=recovery_payload,
+        )
+
+    postgres_connections["expire_lease"](request["request_id"])
+    recovered = store.recover_expired(
+        actor_context=actor,
+        request_id=request["request_id"],
+        outcome=indeterminate,
+        policy_ref=policy_ref,
+        outcome_payload=recovery_payload,
+    )
+    assert recovered.state == "indeterminate"
+    assert recovered.owner_generation == prepared.owner_generation + 1
+
+    succeeded = _outcome(prepared, policy, request, actor, grant, approvals, status="succeeded")
+    with pytest.raises(OptimisticConcurrencyError):
+        store.complete(
+            actor_context=actor,
+            request_id=request["request_id"],
+            expected_version=prepared.version,
+            outcome=succeeded,
+            policy_ref=policy_ref,
+            outcome_payload={
+                "actor_id": actor["actor_id"],
+                "request_digest": request["request_digest"],
+                "authorization_grant_digest": sha256_digest(grant),
+                "outcome_digest": succeeded["outcome_digest"],
+                "status": "succeeded",
+            },
+            state="completed",
+            execution_attempt_id=prepared.execution_attempt_id,
+            owner_generation=prepared.owner_generation,
+        )
+
+
+def test_live_completion_and_expired_recovery_race_has_one_terminal_event(
+    postgres_connections,
+):
+    store = postgres_connections["store"]()
+    actor, request, policy, approvals, grant = _inputs()
+    policy_ref = {
+        "record_type": "policy_decision",
+        "record_id": policy["decision_id"],
+        "record_digest": policy["decision_digest"],
+    }
+    prepared = store.prepare(
+        actor_context=actor,
+        request=request,
+        policy=policy,
+        approvals=approvals,
+        grant=grant,
+        policy_ref=policy_ref,
+        intent_payload=_intent_payload(actor, request, policy, grant),
+    )
+    succeeded = _outcome(prepared, policy, request, actor, grant, approvals, status="succeeded")
+    indeterminate = _outcome(
+        prepared, policy, request, actor, grant, approvals, status="indeterminate"
+    )
+    postgres_connections["expire_lease"](request["request_id"])
+
+    def complete():
+        return store.complete(
+            actor_context=actor,
+            request_id=request["request_id"],
+            expected_version=prepared.version,
+            outcome=succeeded,
+            policy_ref=policy_ref,
+            outcome_payload={
+                "actor_id": actor["actor_id"],
+                "request_digest": request["request_digest"],
+                "authorization_grant_digest": sha256_digest(grant),
+                "outcome_digest": succeeded["outcome_digest"],
+                "status": "succeeded",
+            },
+            state="completed",
+            execution_attempt_id=prepared.execution_attempt_id,
+            owner_generation=prepared.owner_generation,
+        )
+
+    def recover():
+        return store.recover_expired(
+            actor_context=actor,
+            request_id=request["request_id"],
+            outcome=indeterminate,
+            policy_ref=policy_ref,
+            outcome_payload={
+                "actor_id": actor["actor_id"],
+                "request_digest": request["request_digest"],
+                "authorization_grant_digest": sha256_digest(grant),
+                "outcome_digest": indeterminate["outcome_digest"],
+                "status": "indeterminate",
+                "recovery": "lease_expired",
+            },
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(complete), pool.submit(recover)]
+        results = []
+        failures = []
+        for future in futures:
+            try:
+                results.append(future.result())
+            except Exception as exc:  # exact loser varies with lock acquisition
+                failures.append(exc)
+    assert len(results) == 1
+    assert len(failures) == 1
+    assert results[0].state == "indeterminate"
+    assert len(store.events(actor_context=actor, run_id=request["run_id"])) == 2
+
+
+def test_completion_prevents_later_expired_recovery_transition(
+    postgres_connections,
+):
+    store = postgres_connections["store"]()
+    actor, request, policy, approvals, grant = _inputs()
+    policy_ref = {
+        "record_type": "policy_decision",
+        "record_id": policy["decision_id"],
+        "record_digest": policy["decision_digest"],
+    }
+    prepared = store.prepare(
+        actor_context=actor,
+        request=request,
+        policy=policy,
+        approvals=approvals,
+        grant=grant,
+        policy_ref=policy_ref,
+        intent_payload=_intent_payload(actor, request, policy, grant),
+    )
+    succeeded = _outcome(prepared, policy, request, actor, grant, approvals, status="succeeded")
+    indeterminate = _outcome(
+        prepared, policy, request, actor, grant, approvals, status="indeterminate"
+    )
+    completed = store.complete(
+        actor_context=actor,
+        request_id=request["request_id"],
+        expected_version=prepared.version,
+        outcome=succeeded,
+        policy_ref=policy_ref,
+        outcome_payload={
+            "actor_id": actor["actor_id"],
+            "request_digest": request["request_digest"],
+            "authorization_grant_digest": sha256_digest(grant),
+            "outcome_digest": succeeded["outcome_digest"],
+            "status": "succeeded",
+        },
+        state="completed",
+        execution_attempt_id=prepared.execution_attempt_id,
+        owner_generation=prepared.owner_generation,
+    )
+    postgres_connections["expire_lease"](request["request_id"])
+    reconciled = store.recover_expired(
+        actor_context=actor,
+        request_id=request["request_id"],
+        outcome=indeterminate,
+        policy_ref=policy_ref,
+        outcome_payload={
+            "actor_id": actor["actor_id"],
+            "request_digest": request["request_digest"],
+            "authorization_grant_digest": sha256_digest(grant),
+            "outcome_digest": indeterminate["outcome_digest"],
+            "status": "indeterminate",
+            "recovery": "lease_expired",
+        },
+    )
+    assert completed.state == reconciled.state == "completed"
+    assert completed.outcome == reconciled.outcome == succeeded
+    assert len(store.events(actor_context=actor, run_id=request["run_id"])) == 2
 
 
 def test_postgres_rls_scope_and_runtime_role_are_fail_closed(postgres_connections):
@@ -220,7 +437,7 @@ def test_postgres_chronology_regression_rolls_back_without_event(postgres_connec
     now = [datetime(2026, 1, 1, 0, 12, tzinfo=timezone.utc)]
     store = PostgresDurableEffectStore(
         connect=postgres_connections["app"],
-        privileged_connect=postgres_connections["admin"],
+        privileged_connect=postgres_connections["writer"],
         clock=lambda: now[0],
         ids=lambda: "018f0000-0000-7000-8000-000000000099",
     )

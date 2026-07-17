@@ -47,6 +47,15 @@ Storage-provider conformance proves tenant filtering before ranking, revision
 and tombstone behavior, transaction boundaries, concurrent writes, restart
 durability, and migration compatibility.
 
+The PostgreSQL Phase 4 hardening gate additionally runs against a real server
+and proves migration lock/checksum/drift behavior, exact legacy adoption,
+owner/runtime/authority role privileges, forced RLS, denied direct DML,
+denied runtime transition calls, and migration
+tampering, lifecycle replay/projection rebuild, restart at every pre-effect
+state, lease renewal/expiry, stale-owner rejection, and concurrent
+completion-versus-recovery fencing. In-memory or SQLite substitutes do not
+satisfy this gate.
+
 ## End-to-end reference story
 
 The release E2E test starts from a clean machine/container and must:

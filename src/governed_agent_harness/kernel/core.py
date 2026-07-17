@@ -316,6 +316,7 @@ class GovernanceKernel:
         self._grant_verifier = grant_verifier
         self._grant_trust_factory = grant_trust
         self._constraint_registry = constraint_registry or ConstraintRegistry({})
+        self._durable_store = durable_store
         self._nonce_factory = nonce_factory or (lambda: secrets.token_urlsafe(18))
         self._ledger = evidence_ledger or (
             durable_store
@@ -404,19 +405,29 @@ class GovernanceKernel:
                 "deny": KernelLifecycle.DENIED,
                 "require_approval": KernelLifecycle.APPROVAL_REQUIRED,
             }[rule.decision]
-            evidence = self._ledger.append(
-                tenant_id=request["tenant_id"],
-                run_id=request["run_id"],
-                event_kind="kernel.policy_decided",
-                policy_ref=policy_ref,
-                payload={
-                    "actor_id": request["actor_id"],
-                    "request_digest": request["request_digest"],
-                    "policy_decision_digest": decision["decision_digest"],
-                    "next_state": next_state.value,
-                },
-            )
-            record = LifecycleRecord(request, decision, next_state, (evidence,))
+            if self._durable_store is not None:
+                stored = self._durable_store.persist_submission(
+                    actor_context=actor,
+                    request=request,
+                    policy=decision,
+                    state=next_state.value,
+                    policy_ref=policy_ref,
+                )
+                record = _lifecycle_from_stored(stored)
+            else:
+                evidence = self._ledger.append(
+                    tenant_id=request["tenant_id"],
+                    run_id=request["run_id"],
+                    event_kind="kernel.policy_decided",
+                    policy_ref=policy_ref,
+                    payload={
+                        "actor_id": request["actor_id"],
+                        "request_digest": request["request_digest"],
+                        "policy_decision_digest": decision["decision_digest"],
+                        "next_state": next_state.value,
+                    },
+                )
+                record = LifecycleRecord(request, decision, next_state, (evidence,))
             self._idempotency[binding_key] = (
                 copy.deepcopy(request["idempotency"]),
                 request["request_id"],
@@ -426,19 +437,43 @@ class GovernanceKernel:
             return _snapshot(record)
 
     def accept_approval(
-        self, *, tenant_id: str, request_id: str, approval: Mapping[str, Any]
+        self,
+        *,
+        tenant_id: str,
+        request_id: str,
+        approval: Mapping[str, Any],
+        actor_context: Mapping[str, Any] | None = None,
     ) -> LifecycleRecord:
         """Verify and consume one exact approval after policy requires it."""
 
         with self._lock:
             key = (tenant_id, request_id)
             current = self._records.get(key)
+            actor = None
+            stored_version = None
+            if self._durable_store is not None:
+                if actor_context is None:
+                    raise IdentityError("durable approval requires the verified actor context")
+                actor = self._validated_actor(actor_context)
+                if actor["tenant_id"] != tenant_id:
+                    raise IdentityError("approval tenant does not match actor context")
+                stored = self._durable_store.load_lifecycle(
+                    actor_context=actor, request_id=request_id
+                )
+                if stored is not None:
+                    current = _lifecycle_from_stored(stored)
+                    stored_version = stored.version
             if current is None:
                 raise LifecycleError("approval references an unknown request")
+            parsed = ApprovalRecord(approval, expected_tenant=tenant_id).to_dict()
+            if (
+                self._durable_store is not None
+                and current.state is KernelLifecycle.APPROVED
+                and current.approval == parsed
+            ):
+                return _snapshot(current)
             if current.state is not KernelLifecycle.APPROVAL_REQUIRED:
                 raise LifecycleError("approval is not valid in the current lifecycle state")
-
-            parsed = ApprovalRecord(approval, expected_tenant=tenant_id).to_dict()
             validate_approval_binding(parsed, current.policy, current.request)
             validate_constraint_support(parsed, self._constraint_registry)
             if parsed["disposition"] != "approved":
@@ -471,28 +506,38 @@ class GovernanceKernel:
                 "record_id": current.policy["decision_id"],
                 "record_digest": current.policy["decision_digest"],
             }
-            evidence = self._ledger.append(
-                tenant_id=tenant_id,
-                run_id=current.request["run_id"],
-                event_kind="kernel.approval_accepted",
-                policy_ref=policy_ref,
-                payload={
-                    "actor_id": current.request["actor_id"],
-                    "request_digest": current.request["request_digest"],
-                    "policy_decision_digest": current.policy["decision_digest"],
-                    "approval_digest": parsed["approval_digest"],
-                    "next_state": KernelLifecycle.APPROVED.value,
-                },
-            )
+            if self._durable_store is not None:
+                stored = self._durable_store.persist_approval(
+                    actor_context=actor,
+                    request_id=request_id,
+                    expected_version=stored_version,
+                    approval=parsed,
+                    policy_ref=policy_ref,
+                )
+                advanced = _lifecycle_from_stored(stored)
+            else:
+                evidence = self._ledger.append(
+                    tenant_id=tenant_id,
+                    run_id=current.request["run_id"],
+                    event_kind="kernel.approval_accepted",
+                    policy_ref=policy_ref,
+                    payload={
+                        "actor_id": current.request["actor_id"],
+                        "request_digest": current.request["request_digest"],
+                        "policy_decision_digest": current.policy["decision_digest"],
+                        "approval_digest": parsed["approval_digest"],
+                        "next_state": KernelLifecycle.APPROVED.value,
+                    },
+                )
+                advanced = LifecycleRecord(
+                    current.request,
+                    current.policy,
+                    KernelLifecycle.APPROVED,
+                    (*current.evidence, evidence),
+                    parsed,
+                )
             # The evidence append succeeds before either authority consumption or state mutation.
             self._consumed_approvals.add(approval_key)
-            advanced = LifecycleRecord(
-                current.request,
-                current.policy,
-                KernelLifecycle.APPROVED,
-                (*current.evidence, evidence),
-                parsed,
-            )
             self._records[key] = advanced
             return _snapshot(advanced)
 
@@ -502,6 +547,12 @@ class GovernanceKernel:
         actor = ActorContext(actor_context).to_dict()
         with self._lock:
             current = self._records.get((actor["tenant_id"], request_id))
+            if self._durable_store is not None:
+                stored = self._durable_store.load_lifecycle(
+                    actor_context=actor, request_id=request_id
+                )
+                if stored is not None:
+                    current = _lifecycle_from_stored(stored)
             if current is None or current.request["actor_id"] != actor["actor_id"]:
                 raise LifecycleError("actor-scoped request not found")
             self._validate_identity(actor, current.request)
@@ -516,6 +567,13 @@ class GovernanceKernel:
         with self._lock:
             key = (actor["tenant_id"], request_id)
             current = self._records.get(key)
+            if current is None and self._durable_store is not None:
+                lifecycle = self._durable_store.load_lifecycle(
+                    actor_context=actor, request_id=request_id
+                )
+                if lifecycle is not None:
+                    current = _lifecycle_from_stored(lifecycle)
+                    self._records[key] = current
             if (
                 current is None
                 and self._broker is not None
@@ -525,9 +583,9 @@ class GovernanceKernel:
                     actor_context=actor, request_id=request_id
                 )
                 if stored is not None:
-                    if stored.state == "prepared":
+                    if stored.state in {"prepared", "executing"}:
                         raise PreparedExecutionError(
-                            "effect preparation exists without an outcome; explicit recovery is required"
+                            "effect preparation is live or unresolved; recovery requires lease expiry"
                         )
                     if stored.outcome is None or stored.outcome_evidence is None:
                         raise LifecycleError("durable terminal execution has incomplete evidence")
@@ -607,9 +665,11 @@ class GovernanceKernel:
         *,
         actor_context: Mapping[str, Any],
         request_id: str,
-        confirm_dispatch_owner_abandoned: bool = False,
+        confirm_dispatch_owner_abandoned: bool | None = None,
     ) -> LifecycleRecord:
-        """Reconcile a durable prepared effect without invoking the executor."""
+        """Reconcile only an expired lease; the legacy boolean is ignored."""
+
+        del confirm_dispatch_owner_abandoned
 
         actor = ActorContext(actor_context).to_dict()
         self._validate_actor(actor)
@@ -619,7 +679,6 @@ class GovernanceKernel:
             execution = self._broker.recover(
                 actor_context=actor,
                 request_id=request_id,
-                confirm_dispatch_owner_abandoned=confirm_dispatch_owner_abandoned,
             )
             current = self._records.get((actor["tenant_id"], request_id))
             if current is not None:
@@ -671,6 +730,15 @@ class GovernanceKernel:
     def _issue_grant_locked(
         self, *, actor: Mapping[str, Any], current: LifecycleRecord
     ) -> LifecycleRecord:
+        stored_version = None
+        if self._durable_store is not None:
+            stored = self._durable_store.load_lifecycle(
+                actor_context=actor, request_id=current.request["request_id"]
+            )
+            if stored is None:
+                raise LifecycleError("durable lifecycle authority is missing")
+            current = _lifecycle_from_stored(stored)
+            stored_version = stored.version
         if current.grant is not None and current.state in {
             KernelLifecycle.GRANT_ISSUED,
             KernelLifecycle.EFFECT_SUCCEEDED,
@@ -766,28 +834,38 @@ class GovernanceKernel:
             "record_id": current.policy["decision_id"],
             "record_digest": current.policy["decision_digest"],
         }
-        evidence = self._ledger.append(
-            tenant_id=current.request["tenant_id"],
-            run_id=current.request["run_id"],
-            event_kind="kernel.authorization_grant_issued",
-            policy_ref=policy_ref,
-            payload={
-                "actor_id": current.request["actor_id"],
-                "request_digest": current.request["request_digest"],
-                "policy_decision_digest": current.policy["decision_digest"],
-                "authorization_grant_digest": sha256_digest(grant),
-                "expires_at": grant["expires_at"],
-                "next_state": KernelLifecycle.GRANT_ISSUED.value,
-            },
-        )
-        advanced = LifecycleRecord(
-            request=current.request,
-            policy=current.policy,
-            state=KernelLifecycle.GRANT_ISSUED,
-            evidence=(*current.evidence, evidence),
-            approval=current.approval,
-            grant=grant,
-        )
+        if self._durable_store is not None:
+            stored = self._durable_store.persist_grant(
+                actor_context=actor,
+                request_id=current.request["request_id"],
+                expected_version=stored_version,
+                grant=grant,
+                policy_ref=policy_ref,
+            )
+            advanced = _lifecycle_from_stored(stored)
+        else:
+            evidence = self._ledger.append(
+                tenant_id=current.request["tenant_id"],
+                run_id=current.request["run_id"],
+                event_kind="kernel.authorization_grant_issued",
+                policy_ref=policy_ref,
+                payload={
+                    "actor_id": current.request["actor_id"],
+                    "request_digest": current.request["request_digest"],
+                    "policy_decision_digest": current.policy["decision_digest"],
+                    "authorization_grant_digest": sha256_digest(grant),
+                    "expires_at": grant["expires_at"],
+                    "next_state": KernelLifecycle.GRANT_ISSUED.value,
+                },
+            )
+            advanced = LifecycleRecord(
+                request=current.request,
+                policy=current.policy,
+                state=KernelLifecycle.GRANT_ISSUED,
+                evidence=(*current.evidence, evidence),
+                approval=current.approval,
+                grant=grant,
+            )
         key = (current.request["tenant_id"], current.request["request_id"])
         self._records[key] = advanced
         return advanced
@@ -798,6 +876,13 @@ class GovernanceKernel:
         actor = self._validated_actor(actor_context)
         with self._lock:
             record = self._records.get((actor["tenant_id"], request_id))
+            if record is None and self._durable_store is not None:
+                stored = self._durable_store.load_lifecycle(
+                    actor_context=actor, request_id=request_id
+                )
+                if stored is not None:
+                    record = _lifecycle_from_stored(stored)
+                    self._records[(actor["tenant_id"], request_id)] = record
             if record is None or record.request["actor_id"] != actor["actor_id"]:
                 raise LifecycleError("actor-scoped request not found")
             return _snapshot(record)
@@ -867,6 +952,21 @@ def _snapshot(record: LifecycleRecord) -> LifecycleRecord:
         approval=copy.deepcopy(dict(record.approval)) if record.approval is not None else None,
         grant=copy.deepcopy(dict(record.grant)) if record.grant is not None else None,
         outcome=copy.deepcopy(dict(record.outcome)) if record.outcome is not None else None,
+    )
+
+
+def _lifecycle_from_stored(stored: Any) -> LifecycleRecord:
+    try:
+        state = KernelLifecycle(stored.state)
+    except ValueError as exc:
+        raise LifecycleError("durable lifecycle state is unsupported") from exc
+    return LifecycleRecord(
+        request=stored.request,
+        policy=stored.policy,
+        state=state,
+        evidence=stored.evidence,
+        approval=stored.approval,
+        grant=stored.grant,
     )
 
 

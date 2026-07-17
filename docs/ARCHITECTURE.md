@@ -52,7 +52,7 @@ flowchart LR
 | Bounded governance kernel | Implemented | `src/governed_agent_harness/kernel/`; injected identity and current approval trust, deterministic decisions, approval consumption, and in-memory evidence lifecycle |
 | Effect broker | Implemented, bounded | One in-process path issues an exact short-lived grant, appends intent evidence, consumes authority once, invokes an injected reversible synthetic executor, and appends outcome evidence |
 | CLI, SDK, HTTP/MCP surfaces | Planned | Future application layer |
-| PostgreSQL durable effect authority/evidence | Implemented, bounded | Atomic intent/grant consumption, validated outcome, replay, RLS, concurrency, and explicit prepared recovery; broader runtime state remains out of scope |
+| PostgreSQL governed lifecycle/effect authority | Implemented, bounded | Immutable checksummed migrations, canonical pre-effect evidence, rebuildable projection, least-privilege runtime functions, atomic intent/grant consumption, fenced leases, replay, restart, RLS, concurrency, and expired-lease recovery |
 | Sandbox, knowledge, and provider adapters | Planned | The current `none` isolation profile is not sandboxing and no provider executor ships |
 
 ### Target completed architecture
@@ -387,9 +387,16 @@ Within one unit of work, the system appends an event and updates required
 projections atomically. External effects cannot share that database
 transaction; they use an effect idempotency key and a durable intent/result
 protocol. Unknown outcomes are marked `indeterminate` and require
-reconciliation rather than blind retry. This Phase 4 slice requires an explicit
-dispatch-owner-abandoned confirmation and does not infer executor liveness
-across processes.
+reconciliation rather than blind retry. The Phase 4 hardening slice persists an
+attempt ID, owner generation, database lease, and renewal time. Completion and
+recovery use the same fence: a live owner may renew and complete, while recovery
+may record `indeterminate` only after database-observed expiry. Neither path
+retries the effect.
+
+Governed request, policy, approval, and grant records are stored in canonical
+ledger payloads. `gah_request_lifecycle` is only a versioned projection with a
+last evidence position; loads replay and validate authority evidence before
+accepting the projection, and rebuild never creates authorization truth.
 
 ## Concurrency and ordering
 

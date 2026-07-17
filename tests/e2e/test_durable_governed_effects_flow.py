@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import copy
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
@@ -78,6 +81,22 @@ class DeterministicExecutor:
         self.calls = max(0, self.calls - 1)
 
 
+class SlowDeterministicExecutor(DeterministicExecutor):
+    def __init__(self, delay: float) -> None:
+        super().__init__()
+        self.delay = delay
+        self._lock = threading.Lock()
+
+    def execute(
+        self, *, request: Mapping[str, Any], authorization_grant: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        with self._lock:
+            self.calls += 1
+            call = self.calls
+        time.sleep(self.delay)
+        return {"result": "synthetic", "call": call}
+
+
 def _trust(now: datetime) -> TrustContext:
     return TrustContext(
         now=now,
@@ -123,6 +142,7 @@ def _approve(kernel: GovernanceKernel, records: dict[str, dict[str, Any]], await
         tenant_id=awaiting.request["tenant_id"],
         request_id=awaiting.request["request_id"],
         approval=approval,
+        actor_context=records["actor_context"],
     )
 
 
@@ -190,7 +210,41 @@ def test_public_durable_flow_replays_after_kernel_restart(postgres_connections):
     assert restarted_executor.calls == 0
 
 
-def test_prepared_restart_requires_explicit_recovery_and_never_executes(postgres_connections):
+@pytest.mark.parametrize(
+    ("restart_state", "expected_state"),
+    (
+        ("policy_required", KernelLifecycle.APPROVAL_REQUIRED),
+        ("approved", KernelLifecycle.APPROVED),
+        ("grant_issued", KernelLifecycle.GRANT_ISSUED),
+    ),
+)
+def test_pre_effect_lifecycle_rehydrates_at_every_durable_state(
+    postgres_connections, restart_state, expected_state
+):
+    records = build_positive_records()
+    first = _kernel(records, postgres_connections["store"](), DeterministicExecutor())
+    awaiting = first.submit(
+        actor_context=records["actor_context"], tool_request=records["tool_request"]
+    )
+    if restart_state in {"approved", "grant_issued"}:
+        _approve(first, records, awaiting)
+    if restart_state == "grant_issued":
+        first.issue_grant(
+            actor_context=records["actor_context"], request_id=awaiting.request["request_id"]
+        )
+
+    restarted = _kernel(records, postgres_connections["store"](), DeterministicExecutor())
+    loaded = restarted.get(
+        actor_context=records["actor_context"], request_id=awaiting.request["request_id"]
+    )
+    assert loaded.state is expected_state
+    assert loaded.request == awaiting.request
+    assert loaded.policy == awaiting.policy
+
+
+def test_prepared_restart_requires_expired_lease_recovery_and_never_executes(
+    postgres_connections,
+):
     records = build_positive_records()
     store = postgres_connections["store"]()
     actor = records["actor_context"]
@@ -224,6 +278,9 @@ def test_prepared_restart_requires_explicit_recovery_and_never_executes(postgres
     restarted = _kernel(records, postgres_connections["store"](), DeterministicExecutor())
     with pytest.raises(PreparedExecutionError):
         restarted.execute_effect(actor_context=actor, request_id=request["request_id"])
+    with pytest.raises(PreparedExecutionError, match="lease"):
+        restarted.recover_effect(actor_context=actor, request_id=request["request_id"])
+    postgres_connections["expire_lease"](request["request_id"])
     recovered = restarted.recover_effect(
         actor_context=actor,
         request_id=request["request_id"],
@@ -236,3 +293,70 @@ def test_prepared_restart_requires_explicit_recovery_and_never_executes(postgres
         prepared.version
         < store.lookup(actor_context=actor, request_id=request["request_id"]).version
     )
+
+
+def test_two_restarted_brokers_invoke_synthetic_executor_exactly_once(
+    postgres_connections,
+):
+    records = build_positive_records()
+    executor = SlowDeterministicExecutor(0.1)
+    first = _kernel(records, postgres_connections["store"](), executor)
+    awaiting = first.submit(
+        actor_context=records["actor_context"], tool_request=records["tool_request"]
+    )
+    _approve(first, records, awaiting)
+    first.issue_grant(
+        actor_context=records["actor_context"], request_id=awaiting.request["request_id"]
+    )
+    kernels = [
+        _kernel(records, postgres_connections["store"](), executor),
+        _kernel(records, postgres_connections["store"](), executor),
+    ]
+
+    def execute(kernel):
+        return kernel.execute_effect(
+            actor_context=records["actor_context"], request_id=awaiting.request["request_id"]
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(execute, kernel) for kernel in kernels]
+        results, failures = [], []
+        for future in futures:
+            try:
+                results.append(future.result())
+            except Exception as exc:
+                failures.append(exc)
+    assert len(results) in {1, 2}
+    assert len(failures) == 2 - len(results)
+    assert all(isinstance(failure, PreparedExecutionError) for failure in failures)
+    assert all(result.state is KernelLifecycle.EFFECT_SUCCEEDED for result in results)
+    assert executor.calls == 1
+
+
+def test_long_running_executor_renews_lease_until_terminal_commit(postgres_connections):
+    records = build_positive_records()
+    executor = SlowDeterministicExecutor(0.25)
+    store = postgres_connections["store_for_lease"](timedelta(milliseconds=90))
+    renewals = [0]
+    renew_lease = store.renew_lease
+
+    def counted_renewal(**values):
+        renewals[0] += 1
+        return renew_lease(**values)
+
+    store.renew_lease = counted_renewal
+    kernel = _kernel(records, store, executor)
+    awaiting = kernel.submit(
+        actor_context=records["actor_context"], tool_request=records["tool_request"]
+    )
+    _approve(kernel, records, awaiting)
+    completed = kernel.execute_effect(
+        actor_context=records["actor_context"], request_id=awaiting.request["request_id"]
+    )
+    persisted = store.lookup(
+        actor_context=records["actor_context"], request_id=awaiting.request["request_id"]
+    )
+    assert completed.state is KernelLifecycle.EFFECT_SUCCEEDED
+    assert executor.calls == 1
+    assert persisted is not None
+    assert renewals[0] >= 3

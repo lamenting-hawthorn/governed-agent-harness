@@ -88,42 +88,86 @@ def postgres_connections(postgres_server: dict[str, str], tmp_path: Path):
     admin = psycopg.connect(**admin_values)
     admin.autocommit = True
     with admin.cursor() as cursor:
-        cursor.execute("SELECT 1 FROM pg_roles WHERE rolname = 'gah_app'")
-        if cursor.fetchone() is not None:
-            cursor.execute(
-                "REVOKE ALL ON gah_run_heads, gah_evidence_events, gah_effect_executions, gah_grant_consumptions FROM gah_app"
-            )
         cursor.execute("DROP ROLE IF EXISTS gah_app")
+        cursor.execute("DROP ROLE IF EXISTS gah_writer")
         cursor.execute("CREATE ROLE gah_app LOGIN NOSUPERUSER NOBYPASSRLS INHERIT")
+        cursor.execute("CREATE ROLE gah_writer LOGIN NOSUPERUSER NOBYPASSRLS INHERIT")
     admin.close()
     PostgresDurableEffectStore.install_schema(
-        admin_connect=lambda: psycopg.connect(**admin_values), application_role="gah_app"
+        admin_connect=lambda: psycopg.connect(**admin_values),
+        application_role="gah_app",
+        authority_role="gah_writer",
+    )
+    from governed_agent_harness.contracts.positive_fixtures import build_positive_records
+
+    actor = build_positive_records()["actor_context"]
+    PostgresDurableEffectStore.provision_principal(
+        admin_connect=lambda: psycopg.connect(**admin_values),
+        database_roles=("gah_app", "gah_writer"),
+        actor_context=actor,
     )
     reset = psycopg.connect(**admin_values)
     reset.autocommit = True
     with reset.cursor() as cursor:
         cursor.execute(
-            "TRUNCATE gah_grant_consumptions, gah_effect_executions, gah_evidence_events, gah_run_heads"
+            "TRUNCATE gah_grant_consumptions, gah_effect_executions, "
+            "gah_request_lifecycle, gah_evidence_events, gah_run_heads"
         )
     reset.close()
     app_values = {**admin_values, "user": "gah_app"}
+    writer_values = {**admin_values, "user": "gah_writer"}
     yield {
         "admin": lambda: psycopg.connect(**admin_values),
         "app": lambda: psycopg.connect(**app_values),
+        "writer": lambda: psycopg.connect(**writer_values),
         "store": lambda: PostgresDurableEffectStore(
             connect=lambda: psycopg.connect(**app_values),
-            privileged_connect=lambda: psycopg.connect(**admin_values),
+            privileged_connect=lambda: psycopg.connect(**writer_values),
             clock=lambda: datetime(2026, 1, 1, 0, 12, tzinfo=timezone.utc),
             ids=_ids(),
+        ),
+        "store_for_lease": lambda lease_duration: PostgresDurableEffectStore(
+            connect=lambda: psycopg.connect(**app_values),
+            privileged_connect=lambda: psycopg.connect(**writer_values),
+            clock=lambda: datetime(2026, 1, 1, 0, 12, tzinfo=timezone.utc),
+            ids=_ids(),
+            lease_duration=lease_duration,
+        ),
+        "expire_lease": lambda request_id: _admin_update(
+            admin_values,
+            "UPDATE gah_effect_executions "
+            "SET last_renewed_at = clock_timestamp() - interval '2 seconds', "
+            "lease_expires_at = clock_timestamp() - interval '1 second' "
+            "WHERE request_id = %s",
+            (request_id,),
+        ),
+        "tamper_projection": lambda request_id: _admin_update(
+            admin_values,
+            "UPDATE gah_request_lifecycle SET version = version + 1 WHERE request_id = %s",
+            (request_id,),
+        ),
+        "tamper_projection_position": lambda request_id: _admin_update(
+            admin_values,
+            "UPDATE gah_request_lifecycle SET last_evidence_sequence = "
+            "last_evidence_sequence + 100 WHERE request_id = %s",
+            (request_id,),
+        ),
+        "delete_projection": lambda request_id: _admin_update(
+            admin_values,
+            "DELETE FROM gah_request_lifecycle WHERE request_id = %s",
+            (request_id,),
         ),
     }
     cleanup = psycopg.connect(**admin_values)
     cleanup.autocommit = True
     with cleanup.cursor() as cursor:
         cursor.execute(
-            "REVOKE ALL ON gah_run_heads, gah_evidence_events, gah_effect_executions, gah_grant_consumptions FROM gah_app"
+            "DELETE FROM gah_runtime_principals WHERE database_role IN ('gah_app', 'gah_writer')"
         )
+        cursor.execute("REVOKE gah_runtime FROM gah_app")
+        cursor.execute("REVOKE gah_authority_writer FROM gah_writer")
         cursor.execute("DROP ROLE IF EXISTS gah_app")
+        cursor.execute("DROP ROLE IF EXISTS gah_writer")
     cleanup.close()
 
 
@@ -134,6 +178,14 @@ def _ids():
             return f"018f0000-0000-7000-8000-{_ID_STATE[0]:012x}"
 
     return next_id
+
+
+def _admin_update(values, statement, parameters) -> None:
+    import psycopg
+
+    connection = psycopg.connect(**values)
+    with connection, connection.cursor() as cursor:
+        cursor.execute(statement, parameters)
 
 
 def _unavailable(message: str) -> None:

@@ -324,16 +324,14 @@ class EffectBroker:
         *,
         actor_context: Mapping[str, Any],
         request_id: str,
-        confirm_dispatch_owner_abandoned: bool = False,
+        confirm_dispatch_owner_abandoned: bool | None = None,
     ) -> BrokerExecution:
-        """Explicitly reconcile one committed preparation without invoking an executor."""
+        """Reconcile an expired lease; the legacy caller assertion is ignored."""
+
+        del confirm_dispatch_owner_abandoned
 
         if self._durable_store is None:
             raise EffectConfigurationError("durable effect recovery requires a durable store")
-        if not confirm_dispatch_owner_abandoned:
-            raise PreparedExecutionError(
-                "recovery requires an explicit dispatch-owner-abandoned confirmation"
-            )
         actor = ActorContext(actor_context).to_dict()
         stored = self._durable_store.lookup(actor_context=actor, request_id=request_id)
         if stored is None:
@@ -354,10 +352,9 @@ class EffectBroker:
         policy_ref = _record_ref(
             "policy_decision", stored.policy["decision_id"], stored.policy["decision_digest"]
         )
-        completed = self._durable_store.complete(
+        completed = self._durable_store.recover_expired(
             actor_context=actor,
             request_id=request_id,
-            expected_version=stored.version,
             outcome=outcome,
             policy_ref=policy_ref,
             outcome_payload={
@@ -366,9 +363,8 @@ class EffectBroker:
                 "authorization_grant_digest": sha256_digest(stored.grant),
                 "outcome_digest": outcome["outcome_digest"],
                 "status": "indeterminate",
-                "recovery": "explicit",
+                "recovery": "lease_expired",
             },
-            state="indeterminate",
         )
         return self._stored_execution(completed, replayed=True)
 
@@ -397,7 +393,7 @@ class EffectBroker:
             if existing.state in {"completed", "indeterminate"}:
                 return self._stored_execution(existing, replayed=True)
             raise PreparedExecutionError(
-                "effect preparation exists without an outcome; explicit recovery is required"
+                "effect preparation is live or unresolved; recovery requires lease expiry"
             )
 
         self._validate_authority(
@@ -431,9 +427,17 @@ class EffectBroker:
             if prepared.state in {"completed", "indeterminate"}:
                 return self._stored_execution(prepared, replayed=True)
             raise PreparedExecutionError(
-                "effect preparation exists without an outcome; explicit recovery is required"
+                "effect preparation is live or unresolved; recovery requires lease expiry"
             )
-        status, result_payload, effect_active = self._invoke_executor(request, grant)
+        prepared = self._durable_store.renew_lease(
+            actor_context=actor,
+            request_id=request["request_id"],
+            execution_attempt_id=prepared.execution_attempt_id,
+            owner_generation=prepared.owner_generation,
+        )
+        status, result_payload, effect_active = self._invoke_with_durable_heartbeat(
+            actor=actor, request=request, grant=grant, prepared=prepared
+        )
         outcome: dict[str, Any] | None = None
         try:
             outcome = self._build_outcome(
@@ -460,6 +464,8 @@ class EffectBroker:
                     "status": outcome["status"],
                 },
                 state="completed" if status == "succeeded" else "indeterminate",
+                execution_attempt_id=prepared.execution_attempt_id,
+                owner_generation=prepared.owner_generation,
             )
         except Exception:
             if outcome is None:
@@ -484,6 +490,37 @@ class EffectBroker:
                 self._revert_synthetic(request, grant, result_payload)
             raise
         return self._stored_execution(completed)
+
+    def _invoke_with_durable_heartbeat(
+        self,
+        *,
+        actor: Mapping[str, Any],
+        request: Mapping[str, Any],
+        grant: Mapping[str, Any],
+        prepared: StoredEffectExecution,
+    ) -> tuple[str, dict[str, Any], bool]:
+        stop = threading.Event()
+
+        def renew() -> None:
+            interval = getattr(self._durable_store, "heartbeat_interval_seconds", 1.0)
+            while not stop.wait(interval):
+                try:
+                    self._durable_store.renew_lease(
+                        actor_context=actor,
+                        request_id=request["request_id"],
+                        execution_attempt_id=prepared.execution_attempt_id,
+                        owner_generation=prepared.owner_generation,
+                    )
+                except Exception:
+                    return
+
+        heartbeat = threading.Thread(target=renew, name="gah-execution-heartbeat", daemon=True)
+        heartbeat.start()
+        try:
+            return self._invoke_executor(request, grant)
+        finally:
+            stop.set()
+            heartbeat.join(timeout=1)
 
     @staticmethod
     def _validate_stored_scope(actor: Mapping[str, Any], stored: StoredEffectExecution) -> None:

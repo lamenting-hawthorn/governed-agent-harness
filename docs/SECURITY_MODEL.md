@@ -111,6 +111,29 @@ invalidates the decision. Timeouts, policy errors, missing identity, malformed
 requests, and unavailable approval state deny the effect. Read-only model
 generation may continue only if doing so cannot cause the protected effect.
 
+## PostgreSQL authority boundary
+
+The optional Phase 4 store separates `NOLOGIN` schema-owner, runtime-reader,
+and authority-writer roles. Both service roles are `NOSUPERUSER NOBYPASSRLS`.
+The runtime reader cannot modify tables, the migration registry, lifecycle
+state, ownership, grants, policies, or functions. A distinct authority login
+receives only operation-specific, fixed-search-path `SECURITY DEFINER`
+transition entry points; `PUBLIC` and runtime-reader execution are revoked.
+Database scope is
+populated from the exact schema-validated `ActorContext` passed by the kernel,
+and every stored request must bind its digest. This protects against direct SQL
+bypass by the restricted role; possession or compromise of the trusted runtime
+reader credential cannot become write authority. Compromise of the distinct
+authority credential remains a deployment incident, not a substitute for user
+authentication. Each login is explicitly provisioned to exactly one actor;
+installation currently supports only the locked-down `public` schema.
+
+The ledger is authoritative. Lifecycle projection rows carry a version and
+last evidence position and are rejected if replay differs. Execution owners
+carry an attempt ID, generation, lease expiry, and renewal time. A stale owner
+cannot append terminal evidence after expiry or recovery wins the atomic fence.
+Lease expiry records ambiguity as `indeterminate`; it never authorizes retry.
+
 ## Tool and sandbox boundary
 
 Tools are registered by immutable ID and version with input/output schemas,

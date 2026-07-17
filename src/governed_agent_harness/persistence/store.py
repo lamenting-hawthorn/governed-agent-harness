@@ -7,8 +7,7 @@ import hashlib
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from importlib.resources import files
+from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
 from governed_agent_harness.contracts import (
@@ -39,6 +38,32 @@ class PreparedExecutionError(DurableStoreError):
 
 
 @dataclass(frozen=True, slots=True)
+class StoredLifecycle:
+    """Validated, rebuildable pre-effect lifecycle snapshot."""
+
+    actor_context: Mapping[str, Any]
+    request: Mapping[str, Any]
+    policy: Mapping[str, Any]
+    state: str
+    version: int
+    evidence: tuple[Mapping[str, Any], ...]
+    approval: Mapping[str, Any] | None = None
+    grant: Mapping[str, Any] | None = None
+
+    def snapshot(self) -> StoredLifecycle:
+        return StoredLifecycle(
+            actor_context=copy.deepcopy(dict(self.actor_context)),
+            request=copy.deepcopy(dict(self.request)),
+            policy=copy.deepcopy(dict(self.policy)),
+            state=self.state,
+            version=self.version,
+            evidence=tuple(copy.deepcopy(dict(value)) for value in self.evidence),
+            approval=copy.deepcopy(dict(self.approval)) if self.approval is not None else None,
+            grant=copy.deepcopy(dict(self.grant)) if self.grant is not None else None,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class StoredEffectExecution:
     """Immutable snapshot of one durable effect execution."""
 
@@ -53,6 +78,10 @@ class StoredEffectExecution:
     intent_evidence: Mapping[str, Any]
     outcome: Mapping[str, Any] | None = None
     outcome_evidence: Mapping[str, Any] | None = None
+    execution_attempt_id: str | None = None
+    owner_generation: int | None = None
+    lease_expires_at: datetime | None = None
+    last_renewed_at: datetime | None = None
     created: bool = False
 
     def snapshot(self, *, created: bool | None = None) -> StoredEffectExecution:
@@ -72,6 +101,10 @@ class StoredEffectExecution:
                 if self.outcome_evidence is not None
                 else None
             ),
+            execution_attempt_id=self.execution_attempt_id,
+            owner_generation=self.owner_generation,
+            lease_expires_at=self.lease_expires_at,
+            last_renewed_at=self.last_renewed_at,
             created=self.created if created is None else created,
         )
 
@@ -105,7 +138,62 @@ class DurableEffectStore(Protocol):
         policy_ref: Mapping[str, str],
         outcome_payload: Mapping[str, Any],
         state: str,
+        execution_attempt_id: str,
+        owner_generation: int,
     ) -> StoredEffectExecution: ...
+
+    def renew_lease(
+        self,
+        *,
+        actor_context: Mapping[str, Any],
+        request_id: str,
+        execution_attempt_id: str,
+        owner_generation: int,
+    ) -> StoredEffectExecution: ...
+
+    def recover_expired(
+        self,
+        *,
+        actor_context: Mapping[str, Any],
+        request_id: str,
+        outcome: Mapping[str, Any],
+        policy_ref: Mapping[str, str],
+        outcome_payload: Mapping[str, Any],
+    ) -> StoredEffectExecution: ...
+
+    def load_lifecycle(
+        self, *, actor_context: Mapping[str, Any], request_id: str
+    ) -> StoredLifecycle | None: ...
+
+    def persist_submission(
+        self,
+        *,
+        actor_context: Mapping[str, Any],
+        request: Mapping[str, Any],
+        policy: Mapping[str, Any],
+        state: str,
+        policy_ref: Mapping[str, str],
+    ) -> StoredLifecycle: ...
+
+    def persist_approval(
+        self,
+        *,
+        actor_context: Mapping[str, Any],
+        request_id: str,
+        expected_version: int,
+        approval: Mapping[str, Any],
+        policy_ref: Mapping[str, str],
+    ) -> StoredLifecycle: ...
+
+    def persist_grant(
+        self,
+        *,
+        actor_context: Mapping[str, Any],
+        request_id: str,
+        expected_version: int,
+        grant: Mapping[str, Any],
+        policy_ref: Mapping[str, str],
+    ) -> StoredLifecycle: ...
 
 
 class _Connection(Protocol):
@@ -151,61 +239,138 @@ class PostgresDurableEffectStore:
         self,
         *,
         connect: Callable[[], _Connection],
+        privileged_connect: Callable[[], _Connection],
         clock: Callable[[], datetime],
         ids: Callable[[], str],
-        privileged_connect: Callable[[], _Connection] | None = None,
+        lease_duration: timedelta = timedelta(seconds=30),
     ) -> None:
-        self._connect = connect
-        # The application role is read-only.  All authoritative transitions use
-        # a backend-only owner connection that is never exposed to transports.
-        self._privileged_connect = privileged_connect or connect
+        self._runtime_connect = connect
+        self._connect = privileged_connect
         self._clock = clock
         self._ids = ids
+        if lease_duration <= timedelta(0):
+            raise DurableStoreError("lease duration must be positive")
+        self._lease_duration = lease_duration
+
+    @property
+    def heartbeat_interval_seconds(self) -> float:
+        return max(0.01, self._lease_duration.total_seconds() / 3)
 
     @staticmethod
     def install_schema(
-        *, admin_connect: Callable[[], _Connection], application_role: str | None = None
+        *,
+        admin_connect: Callable[[], _Connection],
+        application_role: str | None = None,
+        authority_role: str | None = None,
     ) -> None:
-        """Install the packaged migration and optionally grant a restricted runtime role."""
+        """Apply immutable migrations and grant only runtime-function membership."""
 
-        sql_text = (
-            files("governed_agent_harness.persistence.migrations")
-            .joinpath("0001_durable_effects.sql")
-            .read_text(encoding="utf-8")
-        )
+        if (
+            application_role is not None
+            and authority_role is not None
+            and application_role == authority_role
+        ):
+            raise DurableStoreError("runtime and authority database roles must be distinct")
+        reserved_roles = {"gah_schema_owner", "gah_runtime", "gah_authority_writer"}
+        for role_name in (application_role, authority_role):
+            if role_name is None:
+                continue
+            if not role_name or not role_name.replace("_", "a").isalnum():
+                raise DurableStoreError("database role name is malformed")
+            if role_name in reserved_roles:
+                raise DurableStoreError("service login cannot be a reserved GAH group role")
+
+        from governed_agent_harness.persistence.migration import apply_migrations
+
+        apply_migrations(admin_connect=admin_connect)
+        from psycopg import sql
+
         with admin_connect() as connection, connection.cursor() as cursor:
-            cursor.execute(sql_text)
-            if application_role is not None:
-                if not application_role or not application_role.replace("_", "a").isalnum():
-                    raise DurableStoreError("application role name is malformed")
-                from psycopg import sql
-
-                role = sql.Identifier(application_role)
+            for role_name in (application_role, authority_role):
+                if role_name is None:
+                    continue
                 cursor.execute(
-                    sql.SQL(
-                        "REVOKE ALL ON gah_run_heads, gah_evidence_events, "
-                        "gah_effect_executions, gah_grant_consumptions FROM {}"
-                    ).format(role)
+                    "SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, "
+                    "rolreplication, rolbypassrls FROM pg_roles WHERE rolname = %s",
+                    (role_name,),
+                )
+                attributes = cursor.fetchone()
+                if attributes is None:
+                    raise DurableStoreError("service database login does not exist")
+                if attributes != (True, False, False, False, False, False):
+                    raise DurableStoreError("service database login has unsafe attributes")
+            membership_paths: list[tuple[str, str]] = []
+            if application_role is not None:
+                membership_paths.extend(
+                    (
+                        (application_role, "gah_schema_owner"),
+                        (application_role, "gah_authority_writer"),
+                    )
+                )
+            if authority_role is not None:
+                membership_paths.extend(
+                    (
+                        (authority_role, "gah_schema_owner"),
+                        (authority_role, "gah_runtime"),
+                    )
+                )
+            if application_role is not None and authority_role is not None:
+                membership_paths.extend(
+                    (
+                        (application_role, authority_role),
+                        (authority_role, application_role),
+                        ("gah_runtime", "gah_authority_writer"),
+                    )
+                )
+            for member, group in membership_paths:
+                cursor.execute("SELECT pg_has_role(%s, %s, 'MEMBER')", (member, group))
+                if cursor.fetchone()[0]:
+                    raise DurableStoreError(
+                        "runtime and authority roles have an unsafe membership path"
+                    )
+            for role_name, membership in (
+                (application_role, "gah_runtime"),
+                (authority_role, "gah_authority_writer"),
+            ):
+                if role_name is None:
+                    continue
+                cursor.execute(
+                    sql.SQL("GRANT {} TO {}").format(
+                        sql.Identifier(membership), sql.Identifier(role_name)
+                    )
+                )
+
+    @staticmethod
+    def provision_principal(
+        *,
+        admin_connect: Callable[[], _Connection],
+        database_roles: tuple[str, ...],
+        actor_context: Mapping[str, Any],
+    ) -> None:
+        """Privileged, explicit binding of database logins to one verified actor."""
+
+        actor = ActorContext(actor_context).to_dict()
+        if not database_roles:
+            raise DurableStoreError("at least one database role is required")
+        with admin_connect() as connection, connection.cursor() as cursor:
+            for role_name in database_roles:
+                if not role_name or not role_name.replace("_", "a").isalnum():
+                    raise DurableStoreError("database role name is malformed")
+                cursor.execute(
+                    "INSERT INTO gah_runtime_principals "
+                    "(database_role, tenant_id, actor_id) VALUES (%s, %s, %s) "
+                    "ON CONFLICT (database_role) DO UPDATE SET "
+                    "tenant_id = excluded.tenant_id, actor_id = excluded.actor_id",
+                    (role_name, actor["tenant_id"], actor["actor_id"]),
                 )
 
     def lookup(
         self, *, actor_context: Mapping[str, Any], request_id: str
     ) -> StoredEffectExecution | None:
         actor = ActorContext(actor_context).to_dict()
-        with self._privileged_connect() as connection, connection.cursor() as cursor:
-            self._set_scope(cursor, actor)
-            cursor.execute(
-                """
-                SELECT actor_context_json, request_json, policy_json, approvals_json,
-                       grant_json, binding_digest, state, version, intent_envelope_json,
-                       outcome_json, outcome_envelope_json
-                  FROM gah_effect_executions
-                 WHERE tenant_id = %s AND actor_id = %s AND request_id = %s
-                """,
-                (actor["tenant_id"], actor["actor_id"], request_id),
-            )
-            row = cursor.fetchone()
-        return self._row(row) if row is not None else None
+        with self._runtime_connect() as connection, connection.cursor() as cursor:
+            row = _runtime_read(cursor, actor, "effect_by_request", {"request_id": request_id})
+        return self._row(_effect_row(row)) if row is not None else None
 
     def append(
         self,
@@ -233,8 +398,7 @@ class PostgresDurableEffectStore:
         ):
             raise DurableStoreError("evidence policy reference does not match payload")
         actor = {"tenant_id": tenant_id, "actor_id": actor_id}
-        with self._privileged_connect() as connection, connection.cursor() as cursor:
-            self._set_scope(cursor, actor)
+        with self._connect() as connection, connection.cursor() as cursor:
             return self._append_evidence(
                 cursor=cursor,
                 actor=actor,
@@ -243,6 +407,271 @@ class PostgresDurableEffectStore:
                 policy_ref=policy_ref,
                 payload=payload,
             )
+
+    def persist_submission(
+        self,
+        *,
+        actor_context: Mapping[str, Any],
+        request: Mapping[str, Any],
+        policy: Mapping[str, Any],
+        state: str,
+        policy_ref: Mapping[str, str],
+    ) -> StoredLifecycle:
+        """Atomically append canonical request/policy evidence and create its projection."""
+
+        actor = ActorContext(actor_context).to_dict()
+        parsed_request = ToolRequest(request, expected_tenant=actor["tenant_id"]).to_dict()
+        parsed_policy = PolicyDecision(policy, expected_tenant=actor["tenant_id"]).to_dict()
+        _validate_lifecycle_authority(actor, parsed_request, parsed_policy)
+        expected_state = {
+            "deny": "denied",
+            "require_approval": "approval_required",
+            "allow": "policy_authorized",
+        }.get(parsed_policy["decision"])
+        if state != expected_state:
+            raise DurableStoreError("lifecycle state does not match the policy decision")
+        _require_policy_ref(policy_ref, parsed_policy)
+        payload = {
+            "actor_id": actor["actor_id"],
+            "actor_context": actor,
+            "request": parsed_request,
+            "policy": parsed_policy,
+            "request_digest": parsed_request["request_digest"],
+            "policy_decision_digest": parsed_policy["decision_digest"],
+            "next_state": state,
+        }
+        with self._connect() as connection, connection.cursor() as cursor:
+            replay = _runtime_read(
+                cursor,
+                actor,
+                "lifecycle_by_idempotency",
+                {"idempotency_key": parsed_request["idempotency"]["idempotency_key"]},
+            )
+            if replay is not None:
+                if (
+                    replay["request_id"] == parsed_request["request_id"]
+                    and replay["request_json"]["request_digest"] == parsed_request["request_digest"]
+                ):
+                    return self._load_lifecycle_with_cursor(cursor, actor, replay["request_id"])
+                raise IdempotencyConflictError("durable lifecycle idempotency binding conflicts")
+            evidence = self._append_evidence(
+                cursor=cursor,
+                actor=actor,
+                run_id=parsed_request["run_id"],
+                event_kind="kernel.policy_decided",
+                policy_ref=policy_ref,
+                payload=payload,
+            )
+            _runtime_write(
+                cursor,
+                actor,
+                "insert_lifecycle",
+                {
+                    "run_id": parsed_request["run_id"],
+                    "request_id": parsed_request["request_id"],
+                    "request_digest": parsed_request["request_digest"],
+                    "idempotency_key": parsed_request["idempotency"]["idempotency_key"],
+                    "operation_digest": parsed_request["idempotency"]["operation_digest"],
+                    "policy_decision_digest": parsed_policy["decision_digest"],
+                    "request": parsed_request,
+                    "policy": parsed_policy,
+                    "state": state,
+                    "last_evidence_sequence": evidence["sequence_number"],
+                    "last_evidence_digest": evidence["event_digest"],
+                },
+            )
+        return StoredLifecycle(
+            actor, parsed_request, parsed_policy, state, 1, (evidence,)
+        ).snapshot()
+
+    def persist_approval(
+        self,
+        *,
+        actor_context: Mapping[str, Any],
+        request_id: str,
+        expected_version: int,
+        approval: Mapping[str, Any],
+        policy_ref: Mapping[str, str],
+    ) -> StoredLifecycle:
+        """Atomically append an exact approval and advance the projection once."""
+
+        actor = ActorContext(actor_context).to_dict()
+        parsed = ApprovalRecord(approval, expected_tenant=actor["tenant_id"]).to_dict()
+        with self._connect() as connection, connection.cursor() as cursor:
+            current = self._load_lifecycle_with_cursor(cursor, actor, request_id, for_update=True)
+            if current.state == "approved":
+                if current.approval == parsed:
+                    return current
+                raise IdempotencyConflictError("durable approval replay conflicts")
+            if current.state != "approval_required" or current.version != expected_version:
+                raise OptimisticConcurrencyError("durable approval transition is stale")
+            _validate_lifecycle_authority(actor, current.request, current.policy, approval=parsed)
+            _require_policy_ref(policy_ref, current.policy)
+            payload = {
+                "actor_id": actor["actor_id"],
+                "request_id": current.request["request_id"],
+                "request_digest": current.request["request_digest"],
+                "policy_decision_digest": current.policy["decision_digest"],
+                "approval": parsed,
+                "approval_digest": parsed["approval_digest"],
+                "next_state": "approved",
+            }
+            evidence = self._append_evidence(
+                cursor=cursor,
+                actor=actor,
+                run_id=current.request["run_id"],
+                event_kind="kernel.approval_accepted",
+                policy_ref=policy_ref,
+                payload=payload,
+            )
+            changed = _runtime_write(
+                cursor,
+                actor,
+                "approve_lifecycle",
+                {
+                    "request_id": request_id,
+                    "expected_version": expected_version,
+                    "approval": parsed,
+                    "last_evidence_sequence": evidence["sequence_number"],
+                    "last_evidence_digest": evidence["event_digest"],
+                },
+            )
+            if changed["changed"] != 1:
+                raise OptimisticConcurrencyError("durable approval transition lost its race")
+        return StoredLifecycle(
+            actor,
+            current.request,
+            current.policy,
+            "approved",
+            expected_version + 1,
+            (*current.evidence, evidence),
+            approval=parsed,
+        ).snapshot()
+
+    def persist_grant(
+        self,
+        *,
+        actor_context: Mapping[str, Any],
+        request_id: str,
+        expected_version: int,
+        grant: Mapping[str, Any],
+        policy_ref: Mapping[str, str],
+    ) -> StoredLifecycle:
+        """Atomically append a canonical grant and advance its rebuildable projection."""
+
+        actor = ActorContext(actor_context).to_dict()
+        parsed = AuthorizationGrant(grant, expected_tenant=actor["tenant_id"]).to_dict()
+        with self._connect() as connection, connection.cursor() as cursor:
+            current = self._load_lifecycle_with_cursor(cursor, actor, request_id, for_update=True)
+            if current.state == "grant_issued":
+                if current.grant == parsed:
+                    return current
+                raise IdempotencyConflictError("durable grant replay conflicts")
+            if current.state not in {"policy_authorized", "approved"}:
+                raise OptimisticConcurrencyError("durable grant state is not issuable")
+            if current.version != expected_version:
+                raise OptimisticConcurrencyError("durable grant transition is stale")
+            _validate_lifecycle_authority(
+                actor,
+                current.request,
+                current.policy,
+                approval=current.approval,
+                grant=parsed,
+            )
+            _require_policy_ref(policy_ref, current.policy)
+            payload = {
+                "actor_id": actor["actor_id"],
+                "request_id": current.request["request_id"],
+                "request_digest": current.request["request_digest"],
+                "policy_decision_digest": current.policy["decision_digest"],
+                "grant": parsed,
+                "authorization_grant_digest": sha256_digest(parsed),
+                "next_state": "grant_issued",
+            }
+            evidence = self._append_evidence(
+                cursor=cursor,
+                actor=actor,
+                run_id=current.request["run_id"],
+                event_kind="kernel.authorization_grant_issued",
+                policy_ref=policy_ref,
+                payload=payload,
+            )
+            changed = _runtime_write(
+                cursor,
+                actor,
+                "grant_lifecycle",
+                {
+                    "request_id": request_id,
+                    "expected_version": expected_version,
+                    "grant": parsed,
+                    "last_evidence_sequence": evidence["sequence_number"],
+                    "last_evidence_digest": evidence["event_digest"],
+                },
+            )
+            if changed["changed"] != 1:
+                raise OptimisticConcurrencyError("durable grant transition lost its race")
+        return StoredLifecycle(
+            actor,
+            current.request,
+            current.policy,
+            "grant_issued",
+            expected_version + 1,
+            (*current.evidence, evidence),
+            approval=current.approval,
+            grant=parsed,
+        ).snapshot()
+
+    def load_lifecycle(
+        self, *, actor_context: Mapping[str, Any], request_id: str
+    ) -> StoredLifecycle | None:
+        actor = ActorContext(actor_context).to_dict()
+        with self._runtime_connect() as connection, connection.cursor() as cursor:
+            return self._load_lifecycle_with_cursor(cursor, actor, request_id, missing_ok=True)
+
+    def rebuild_lifecycle(
+        self, *, actor_context: Mapping[str, Any], request_id: str
+    ) -> StoredLifecycle:
+        """Rebuild and repair only the projection from authoritative canonical evidence."""
+
+        actor = ActorContext(actor_context).to_dict()
+        with self._connect() as connection, connection.cursor() as cursor:
+            candidate_rows = _runtime_read(
+                cursor, actor, "lifecycle_events", {"request_id": request_id}
+            )
+            candidates = tuple(
+                EvidenceEnvelope(row, expected_tenant=actor["tenant_id"]).to_dict()
+                for row in candidate_rows
+            )
+            run_ids = {event["draft"]["run_id"] for event in candidates}
+            if len(run_ids) != 1:
+                raise DurableStoreError("canonical lifecycle run authority is missing")
+            _runtime_write(cursor, actor, "lock_run", {"run_id": next(iter(run_ids))})
+            rebuilt = self._replay_lifecycle(cursor, actor, request_id)
+            last = rebuilt.evidence[-1]
+            changed = _runtime_write(
+                cursor,
+                actor,
+                "rebuild_lifecycle",
+                {
+                    "request_id": request_id,
+                    "run_id": rebuilt.request["run_id"],
+                    "request_digest": rebuilt.request["request_digest"],
+                    "idempotency_key": rebuilt.request["idempotency"]["idempotency_key"],
+                    "operation_digest": rebuilt.request["idempotency"]["operation_digest"],
+                    "policy_decision_digest": rebuilt.policy["decision_digest"],
+                    "request": rebuilt.request,
+                    "policy": rebuilt.policy,
+                    "approvals": [rebuilt.approval] if rebuilt.approval else [],
+                    "grant": rebuilt.grant,
+                    "state": rebuilt.state,
+                    "version": rebuilt.version,
+                    "last_evidence_sequence": last["sequence_number"],
+                    "last_evidence_digest": last["event_digest"],
+                },
+            )
+            if changed["changed"] != 1:
+                raise DurableStoreError("lifecycle projection rebuild lost its actor scope")
+        return rebuilt.snapshot()
 
     def prepare(
         self,
@@ -283,8 +712,7 @@ class PostgresDurableEffectStore:
                 _lock_key(f"grant:{actor['tenant_id']}:{parsed_grant['grant_id']}"),
             )
         )
-        with self._privileged_connect() as connection, connection.cursor() as cursor:
-            self._set_scope(cursor, actor)
+        with self._connect() as connection, connection.cursor() as cursor:
             for value in lock_values:
                 cursor.execute("SELECT pg_advisory_xact_lock(%s)", (value,))
             existing = self._select_for_binding(cursor, actor, parsed_request, parsed_grant)
@@ -301,52 +729,31 @@ class PostgresDurableEffectStore:
                 payload=intent_payload,
             )
             now = _aware_utc(self._clock())
-            cursor.execute(
-                """
-                INSERT INTO gah_effect_executions (
-                    tenant_id, actor_id, run_id, request_id, idempotency_key,
-                    operation_digest, binding_digest, grant_id, grant_digest, state,
-                    version, actor_context_json, request_json, policy_json, approvals_json,
-                    grant_json, intent_envelope_json, prepared_at
-                ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, 'prepared', 1,
-                    %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb, %s
-                )
-                """,
-                (
-                    actor["tenant_id"],
-                    actor["actor_id"],
-                    parsed_request["run_id"],
-                    parsed_request["request_id"],
-                    parsed_request["idempotency"]["idempotency_key"],
-                    parsed_request["idempotency"]["operation_digest"],
-                    binding_digest,
-                    parsed_grant["grant_id"],
-                    sha256_digest(parsed_grant),
-                    _json(actor),
-                    _json(parsed_request),
-                    _json(parsed_policy),
-                    _json(list(parsed_approvals)),
-                    _json(parsed_grant),
-                    _json(intent),
-                    now,
-                ),
+            attempt_id = self._ids()
+            inserted = _runtime_write(
+                cursor,
+                actor,
+                "insert_effect",
+                {
+                    "run_id": parsed_request["run_id"],
+                    "request_id": parsed_request["request_id"],
+                    "idempotency_key": parsed_request["idempotency"]["idempotency_key"],
+                    "operation_digest": parsed_request["idempotency"]["operation_digest"],
+                    "binding_digest": binding_digest,
+                    "grant_id": parsed_grant["grant_id"],
+                    "grant_digest": sha256_digest(parsed_grant),
+                    "request": parsed_request,
+                    "policy": parsed_policy,
+                    "approvals": list(parsed_approvals),
+                    "grant": parsed_grant,
+                    "intent": intent,
+                    "prepared_at": _utc_millis(now),
+                    "attempt_id": attempt_id,
+                    "lease_seconds": self._lease_duration.total_seconds(),
+                },
             )
-            cursor.execute(
-                """
-                INSERT INTO gah_grant_consumptions (
-                    tenant_id, actor_id, grant_id, grant_digest, request_id, consumed_at
-                ) VALUES (%s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    actor["tenant_id"],
-                    actor["actor_id"],
-                    parsed_grant["grant_id"],
-                    sha256_digest(parsed_grant),
-                    parsed_request["request_id"],
-                    now,
-                ),
-            )
+            lease_expires_at = _parse_time(inserted["lease_expires_at"])
+            last_renewed_at = _parse_time(inserted["last_renewed_at"])
         return StoredEffectExecution(
             actor,
             parsed_request,
@@ -357,6 +764,10 @@ class PostgresDurableEffectStore:
             "prepared",
             1,
             intent,
+            execution_attempt_id=attempt_id,
+            owner_generation=1,
+            lease_expires_at=lease_expires_at,
+            last_renewed_at=last_renewed_at,
             created=True,
         ).snapshot()
 
@@ -370,6 +781,8 @@ class PostgresDurableEffectStore:
         policy_ref: Mapping[str, str],
         outcome_payload: Mapping[str, Any],
         state: str,
+        execution_attempt_id: str,
+        owner_generation: int,
     ) -> StoredEffectExecution:
         actor = ActorContext(actor_context).to_dict()
         if state not in {"completed", "indeterminate"}:
@@ -379,24 +792,17 @@ class PostgresDurableEffectStore:
         if parsed_outcome["status"] != expected_status:
             raise DurableStoreError("outcome status does not match the durable terminal state")
 
-        with self._privileged_connect() as connection, connection.cursor() as cursor:
-            self._set_scope(cursor, actor)
-            cursor.execute(
-                """
-                SELECT actor_context_json, request_json, policy_json, approvals_json,
-                       grant_json, binding_digest, state, version, intent_envelope_json,
-                       outcome_json, outcome_envelope_json
-                  FROM gah_effect_executions
-                 WHERE tenant_id = %s AND actor_id = %s AND request_id = %s
-                 FOR UPDATE
-                """,
-                (actor["tenant_id"], actor["actor_id"], request_id),
-            )
-            row = cursor.fetchone()
+        with self._connect() as connection, connection.cursor() as cursor:
+            row = _runtime_read(cursor, actor, "effect_by_request", {"request_id": request_id})
             if row is None:
                 raise DurableStoreError("durable execution was not found")
-            stored = self._row(row)
-            if stored.state != "prepared" or stored.version != expected_version:
+            stored = self._row(_effect_row(row))
+            if (
+                stored.state not in {"prepared", "executing"}
+                or stored.version != expected_version
+                or stored.execution_attempt_id != execution_attempt_id
+                or stored.owner_generation != owner_generation
+            ):
                 if (
                     stored.state == state
                     and stored.version == expected_version + 1
@@ -429,26 +835,22 @@ class PostgresDurableEffectStore:
                 payload=outcome_payload,
             )
             now = _aware_utc(self._clock())
-            cursor.execute(
-                """
-                UPDATE gah_effect_executions
-                   SET state = %s, version = version + 1, outcome_json = %s::jsonb,
-                       outcome_envelope_json = %s::jsonb, completed_at = %s
-                 WHERE tenant_id = %s AND actor_id = %s AND request_id = %s
-                   AND state = 'prepared' AND version = %s
-                """,
-                (
-                    state,
-                    _json(parsed_outcome),
-                    _json(evidence),
-                    now,
-                    actor["tenant_id"],
-                    actor["actor_id"],
-                    request_id,
-                    expected_version,
-                ),
+            changed = _runtime_write(
+                cursor,
+                actor,
+                "complete_effect",
+                {
+                    "request_id": request_id,
+                    "state": state,
+                    "expected_version": expected_version,
+                    "attempt_id": execution_attempt_id,
+                    "owner_generation": owner_generation,
+                    "outcome": parsed_outcome,
+                    "evidence": evidence,
+                    "completed_at": _utc_millis(now),
+                },
             )
-            if cursor.rowcount != 1:
+            if changed["changed"] != 1:
                 raise OptimisticConcurrencyError("durable execution transition lost its race")
         return StoredEffectExecution(
             actor_context=stored.actor_context,
@@ -462,33 +864,302 @@ class PostgresDurableEffectStore:
             intent_evidence=stored.intent_evidence,
             outcome=parsed_outcome,
             outcome_evidence=evidence,
+            execution_attempt_id=stored.execution_attempt_id,
+            owner_generation=stored.owner_generation,
+            lease_expires_at=stored.lease_expires_at,
+            last_renewed_at=stored.last_renewed_at,
+        ).snapshot()
+
+    def renew_lease(
+        self,
+        *,
+        actor_context: Mapping[str, Any],
+        request_id: str,
+        execution_attempt_id: str,
+        owner_generation: int,
+    ) -> StoredEffectExecution:
+        """Renew only the live fenced owner using the database clock."""
+
+        actor = ActorContext(actor_context).to_dict()
+        with self._connect() as connection, connection.cursor() as cursor:
+            row = _runtime_write(
+                cursor,
+                actor,
+                "renew_effect",
+                {
+                    "request_id": request_id,
+                    "attempt_id": execution_attempt_id,
+                    "owner_generation": owner_generation,
+                    "lease_seconds": self._lease_duration.total_seconds(),
+                },
+            )
+            if row is None:
+                raise OptimisticConcurrencyError("execution lease is expired or fenced")
+        return self._row(_effect_row(row))
+
+    def recover_expired(
+        self,
+        *,
+        actor_context: Mapping[str, Any],
+        request_id: str,
+        outcome: Mapping[str, Any],
+        policy_ref: Mapping[str, str],
+        outcome_payload: Mapping[str, Any],
+    ) -> StoredEffectExecution:
+        """Atomically fence an expired owner and record an indeterminate outcome."""
+
+        actor = ActorContext(actor_context).to_dict()
+        parsed_outcome = ActionOutcome(outcome, expected_tenant=actor["tenant_id"]).to_dict()
+        if parsed_outcome["status"] != "indeterminate":
+            raise DurableStoreError("expired recovery requires an indeterminate outcome")
+        with self._connect() as connection, connection.cursor() as cursor:
+            row = _runtime_read(cursor, actor, "effect_by_request", {"request_id": request_id})
+            if row is None:
+                raise DurableStoreError("durable execution was not found")
+            stored = self._row(_effect_row(row))
+            if stored.state in {"completed", "failed", "indeterminate"}:
+                return stored.snapshot()
+            if not row["_lease_expired"]:
+                raise PreparedExecutionError("execution lease has not expired")
+            expected_policy_ref = {
+                "record_type": "policy_decision",
+                "record_id": stored.policy["decision_id"],
+                "record_digest": stored.policy["decision_digest"],
+            }
+            if dict(policy_ref) != expected_policy_ref:
+                raise DurableStoreError("recovery policy reference is invalid")
+            if (
+                outcome_payload.get("request_digest") != stored.request["request_digest"]
+                or outcome_payload.get("authorization_grant_digest") != sha256_digest(stored.grant)
+                or outcome_payload.get("outcome_digest") != parsed_outcome["outcome_digest"]
+                or outcome_payload.get("status") != "indeterminate"
+            ):
+                raise DurableStoreError("recovery evidence payload is not bound to authority")
+            _validate_outcome_binding(stored, parsed_outcome)
+            evidence = self._append_evidence(
+                cursor=cursor,
+                actor=actor,
+                run_id=stored.request["run_id"],
+                event_kind="kernel.effect_execution_outcome",
+                policy_ref=policy_ref,
+                payload=outcome_payload,
+            )
+            changed = _runtime_write(
+                cursor,
+                actor,
+                "recover_effect",
+                {
+                    "request_id": request_id,
+                    "attempt_id": stored.execution_attempt_id,
+                    "owner_generation": stored.owner_generation,
+                    "outcome": parsed_outcome,
+                    "evidence": evidence,
+                },
+            )
+            if changed["changed"] != 1:
+                raise OptimisticConcurrencyError("expired recovery lost its fence race")
+        return StoredEffectExecution(
+            actor_context=stored.actor_context,
+            request=stored.request,
+            policy=stored.policy,
+            approvals=stored.approvals,
+            grant=stored.grant,
+            binding_digest=stored.binding_digest,
+            state="indeterminate",
+            version=stored.version + 1,
+            intent_evidence=stored.intent_evidence,
+            outcome=parsed_outcome,
+            outcome_evidence=evidence,
+            execution_attempt_id=stored.execution_attempt_id,
+            owner_generation=(stored.owner_generation or 0) + 1,
+            lease_expires_at=stored.lease_expires_at,
+            last_renewed_at=stored.last_renewed_at,
         ).snapshot()
 
     def events(
         self, *, actor_context: Mapping[str, Any], run_id: str | None = None
     ) -> tuple[dict[str, Any], ...]:
         actor = ActorContext(actor_context).to_dict()
-        with self._privileged_connect() as connection, connection.cursor() as cursor:
-            self._set_scope(cursor, actor)
-            if run_id is None:
-                cursor.execute(
-                    """
-                    SELECT envelope_json FROM gah_evidence_events
-                     WHERE tenant_id = %s AND actor_id = %s
-                     ORDER BY run_id, sequence_number
-                    """,
-                    (actor["tenant_id"], actor["actor_id"]),
-                )
-            else:
-                cursor.execute(
-                    """
-                    SELECT envelope_json FROM gah_evidence_events
-                     WHERE tenant_id = %s AND actor_id = %s AND run_id = %s
-                     ORDER BY sequence_number
-                    """,
-                    (actor["tenant_id"], actor["actor_id"], run_id),
-                )
-            return tuple(copy.deepcopy(row[0]) for row in cursor.fetchall())
+        with self._runtime_connect() as connection, connection.cursor() as cursor:
+            rows = _runtime_read(cursor, actor, "events", {"run_id": run_id})
+            return tuple(copy.deepcopy(row) for row in rows)
+
+    def _load_lifecycle_with_cursor(
+        self,
+        cursor: Any,
+        actor: Mapping[str, Any],
+        request_id: str,
+        *,
+        for_update: bool = False,
+        missing_ok: bool = False,
+    ) -> StoredLifecycle | None:
+        value = _runtime_read(cursor, actor, "lifecycle_by_id", {"request_id": request_id})
+        if value is None:
+            if missing_ok:
+                return None
+            raise DurableStoreError("durable lifecycle was not found")
+        approvals = value["approvals_json"]
+        row = (
+            value["actor_context_json"],
+            value["request_json"],
+            value["policy_json"],
+            approvals[0] if approvals else None,
+            value.get("grant_json"),
+            value["state"],
+            value["version"],
+            value["last_evidence_sequence"],
+            value["last_evidence_digest"],
+        )
+        rebuilt = self._replay_lifecycle(cursor, actor, request_id)
+        expected = (
+            rebuilt.actor_context,
+            rebuilt.request,
+            rebuilt.policy,
+            rebuilt.approval,
+            rebuilt.grant,
+            rebuilt.state,
+            rebuilt.version,
+            rebuilt.evidence[-1]["sequence_number"],
+            rebuilt.evidence[-1]["event_digest"],
+        )
+        if tuple(row) != expected:
+            raise DurableStoreError(
+                "lifecycle projection diverged from authoritative evidence; rebuild required"
+            )
+        return rebuilt.snapshot()
+
+    def _replay_lifecycle(
+        self, cursor: Any, actor: Mapping[str, Any], request_id: str
+    ) -> StoredLifecycle:
+        candidate_rows = _runtime_read(
+            cursor, actor, "lifecycle_events", {"request_id": request_id}
+        )
+        candidates = tuple(
+            EvidenceEnvelope(row, expected_tenant=actor["tenant_id"]).to_dict()
+            for row in candidate_rows
+        )
+        if not candidates:
+            raise DurableStoreError("canonical lifecycle authority evidence is missing")
+        run_ids = {event["draft"]["run_id"] for event in candidates}
+        if len(run_ids) != 1:
+            raise DurableStoreError("lifecycle evidence spans multiple runs")
+        run_id = next(iter(run_ids))
+        all_rows = _runtime_read(cursor, actor, "events", {"run_id": run_id})
+        events = tuple(
+            EvidenceEnvelope(row, expected_tenant=actor["tenant_id"]).to_dict() for row in all_rows
+        )
+        prior_digest = None
+        prior_time = None
+        for sequence, event in enumerate(events):
+            recorded_at = _parse_time(event["recorded_at"])
+            if (
+                event["sequence_number"] != sequence
+                or event["prior_event_digest"] != prior_digest
+                or (prior_time is not None and recorded_at < prior_time)
+            ):
+                raise DurableStoreError("authoritative evidence run chain is invalid")
+            prior_digest = event["event_digest"]
+            prior_time = recorded_at
+        lifecycle_events = tuple(
+            event
+            for event in events
+            if (
+                event["draft"]["inline_payload"].get("request_id") == request_id
+                or event["draft"]["inline_payload"].get("request", {}).get("request_id")
+                == request_id
+            )
+            and event["draft"]["event_kind"]
+            in {
+                "kernel.policy_decided",
+                "kernel.approval_accepted",
+                "kernel.authorization_grant_issued",
+            }
+        )
+        if (
+            not lifecycle_events
+            or lifecycle_events[0]["draft"]["event_kind"] != "kernel.policy_decided"
+        ):
+            raise DurableStoreError("canonical lifecycle authority evidence is missing")
+        first_payload = lifecycle_events[0]["draft"]["inline_payload"]
+        stored_actor = ActorContext(first_payload["actor_context"]).to_dict()
+        if stored_actor != actor:
+            raise DurableStoreError("lifecycle evidence actor context does not exactly match")
+        request = ToolRequest(
+            first_payload["request"], expected_tenant=actor["tenant_id"]
+        ).to_dict()
+        policy = PolicyDecision(
+            first_payload["policy"], expected_tenant=actor["tenant_id"]
+        ).to_dict()
+        if request["request_id"] != request_id:
+            raise DurableStoreError("lifecycle evidence request binding is invalid")
+        expected_policy_ref = {
+            "record_type": "policy_decision",
+            "record_id": policy["decision_id"],
+            "record_digest": policy["decision_digest"],
+        }
+        expected_initial_state = {
+            "deny": "denied",
+            "require_approval": "approval_required",
+            "allow": "policy_authorized",
+        }.get(policy["decision"])
+        if (
+            first_payload.get("actor_id") != actor["actor_id"]
+            or first_payload.get("request_digest") != request["request_digest"]
+            or first_payload.get("policy_decision_digest") != policy["decision_digest"]
+            or first_payload.get("next_state") != expected_initial_state
+            or lifecycle_events[0]["policy_refs"] != [expected_policy_ref]
+        ):
+            raise DurableStoreError("policy evidence bindings or state are invalid")
+        approval = None
+        grant = None
+        state = first_payload["next_state"]
+        for event in lifecycle_events[1:]:
+            payload = event["draft"]["inline_payload"]
+            kind = event["draft"]["event_kind"]
+            if kind == "kernel.approval_accepted":
+                if approval is not None or grant is not None:
+                    raise DurableStoreError("lifecycle approval chronology is invalid")
+                approval = ApprovalRecord(
+                    payload["approval"], expected_tenant=actor["tenant_id"]
+                ).to_dict()
+                if (
+                    payload.get("actor_id") != actor["actor_id"]
+                    or payload.get("request_id") != request_id
+                    or payload.get("request_digest") != request["request_digest"]
+                    or payload.get("policy_decision_digest") != policy["decision_digest"]
+                    or payload.get("approval_digest") != approval["approval_digest"]
+                    or payload.get("next_state") != "approved"
+                ):
+                    raise DurableStoreError("approval evidence binding is invalid")
+            elif kind == "kernel.authorization_grant_issued":
+                if grant is not None:
+                    raise DurableStoreError("lifecycle grant evidence is duplicated")
+                grant = AuthorizationGrant(
+                    payload["grant"], expected_tenant=actor["tenant_id"]
+                ).to_dict()
+                if (
+                    payload.get("actor_id") != actor["actor_id"]
+                    or payload.get("request_id") != request_id
+                    or payload.get("request_digest") != request["request_digest"]
+                    or payload.get("policy_decision_digest") != policy["decision_digest"]
+                    or payload.get("authorization_grant_digest") != sha256_digest(grant)
+                    or payload.get("next_state") != "grant_issued"
+                ):
+                    raise DurableStoreError("grant evidence binding is invalid")
+            if event["policy_refs"] != [expected_policy_ref]:
+                raise DurableStoreError("lifecycle evidence policy reference is invalid")
+            state = payload["next_state"]
+        _validate_lifecycle_authority(actor, request, policy, approval=approval, grant=grant)
+        return StoredLifecycle(
+            actor_context=actor,
+            request=request,
+            policy=policy,
+            state=state,
+            version=len(lifecycle_events),
+            evidence=lifecycle_events,
+            approval=approval,
+            grant=grant,
+        ).snapshot()
 
     def _select_for_binding(
         self,
@@ -497,30 +1168,21 @@ class PostgresDurableEffectStore:
         request: Mapping[str, Any],
         grant: Mapping[str, Any],
     ) -> StoredEffectExecution | None:
-        cursor.execute(
-            """
-            SELECT actor_context_json, request_json, policy_json, approvals_json,
-                   grant_json, binding_digest, state, version, intent_envelope_json,
-                   outcome_json, outcome_envelope_json
-              FROM gah_effect_executions
-             WHERE tenant_id = %s AND actor_id = %s
-               AND (idempotency_key = %s OR grant_id = %s OR request_id = %s)
-             FOR UPDATE
-            """,
-            (
-                actor["tenant_id"],
-                actor["actor_id"],
-                request["idempotency"]["idempotency_key"],
-                grant["grant_id"],
-                request["request_id"],
-            ),
+        rows = _runtime_read(
+            cursor,
+            actor,
+            "effect_by_binding",
+            {
+                "idempotency_key": request["idempotency"]["idempotency_key"],
+                "grant_id": grant["grant_id"],
+                "request_id": request["request_id"],
+            },
         )
-        rows = cursor.fetchall()
         if not rows:
             return None
         if len(rows) != 1:
             raise IdempotencyConflictError("durable authority bindings reference different rows")
-        return self._row(rows[0])
+        return self._row(_effect_row(rows[0]))
 
     def _append_evidence(
         self,
@@ -532,27 +1194,15 @@ class PostgresDurableEffectStore:
         policy_ref: Mapping[str, str],
         payload: Mapping[str, Any],
     ) -> dict[str, Any]:
-        cursor.execute(
-            """
-            INSERT INTO gah_run_heads (tenant_id, actor_id, run_id)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (tenant_id, run_id) DO NOTHING
-            """,
-            (actor["tenant_id"], actor["actor_id"], run_id),
-        )
-        cursor.execute(
-            """
-                SELECT next_sequence, last_event_digest, last_recorded_at, version
-              FROM gah_run_heads
-             WHERE tenant_id = %s AND actor_id = %s AND run_id = %s
-             FOR UPDATE
-            """,
-            (actor["tenant_id"], actor["actor_id"], run_id),
-        )
-        head = cursor.fetchone()
+        head = _runtime_write(cursor, actor, "lock_run", {"run_id": run_id})
         if head is None:
             raise DurableStoreError("run scope conflicts with an existing actor")
-        sequence, prior_digest, prior_recorded_at, version = head
+        sequence = head["next_sequence"]
+        prior_digest = head["last_event_digest"]
+        prior_recorded_at = (
+            _parse_time(head["last_recorded_at"]) if head["last_recorded_at"] is not None else None
+        )
+        version = head["version"]
         now_dt = _aware_utc(self._clock())
         if prior_recorded_at is not None and now_dt < prior_recorded_at:
             raise DurableStoreError("evidence chronology regressed within a run")
@@ -590,50 +1240,15 @@ class PostgresDurableEffectStore:
         }
         apply_object_digest(envelope)
         parsed = EvidenceEnvelope(envelope, expected_tenant=actor["tenant_id"]).to_dict()
-        cursor.execute(
-            """
-            INSERT INTO gah_evidence_events (
-                tenant_id, actor_id, run_id, sequence_number, envelope_id,
-                event_digest, prior_event_digest, envelope_json, recorded_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
-            """,
-            (
-                actor["tenant_id"],
-                actor["actor_id"],
-                run_id,
-                sequence,
-                parsed["envelope_id"],
-                parsed["event_digest"],
-                parsed["prior_event_digest"],
-                _json(parsed),
-                now_dt,
-            ),
+        changed = _runtime_write(
+            cursor,
+            actor,
+            "commit_evidence",
+            {"run_id": run_id, "expected_version": version, "envelope": parsed},
         )
-        cursor.execute(
-            """
-            UPDATE gah_run_heads
-               SET next_sequence = %s, last_event_digest = %s,
-                   last_recorded_at = %s, version = version + 1
-             WHERE tenant_id = %s AND actor_id = %s AND run_id = %s AND version = %s
-            """,
-            (
-                sequence + 1,
-                parsed["event_digest"],
-                now_dt,
-                actor["tenant_id"],
-                actor["actor_id"],
-                run_id,
-                version,
-            ),
-        )
-        if cursor.rowcount != 1:
+        if changed["changed"] != 1:
             raise OptimisticConcurrencyError("run evidence sequence lost its race")
         return parsed
-
-    @staticmethod
-    def _set_scope(cursor: Any, actor: Mapping[str, Any]) -> None:
-        cursor.execute("SELECT set_config('gah.tenant_id', %s, true)", (actor["tenant_id"],))
-        cursor.execute("SELECT set_config('gah.actor_id', %s, true)", (actor["actor_id"],))
 
     @staticmethod
     def _row(row: Any) -> StoredEffectExecution:
@@ -654,6 +1269,10 @@ class PostgresDurableEffectStore:
             intent_evidence=intent,
             outcome=row[9],
             outcome_evidence=row[10],
+            execution_attempt_id=row[11],
+            owner_generation=row[12],
+            lease_expires_at=row[13],
+            last_renewed_at=row[14],
         ).snapshot()
         _validate_intent_evidence(stored)
         if stored.version < 1 or stored.binding_digest != execution_binding_digest(
@@ -664,11 +1283,19 @@ class PostgresDurableEffectStore:
             grant=grant,
         ):
             raise DurableStoreError("durable execution binding digest is invalid")
-        if stored.state == "prepared" and (
+        if (
+            not stored.execution_attempt_id
+            or not stored.owner_generation
+            or stored.owner_generation < 1
+            or stored.lease_expires_at is None
+            or stored.last_renewed_at is None
+        ):
+            raise DurableStoreError("durable execution fence metadata is invalid")
+        if stored.state in {"prepared", "executing"} and (
             stored.outcome is not None or stored.outcome_evidence is not None
         ):
-            raise DurableStoreError("prepared execution contains terminal evidence")
-        if stored.state in {"completed", "indeterminate"}:
+            raise DurableStoreError("live execution contains terminal evidence")
+        if stored.state in {"completed", "failed", "indeterminate"}:
             if stored.outcome is None or stored.outcome_evidence is None:
                 raise DurableStoreError("terminal execution is missing outcome evidence")
             parsed_outcome = ActionOutcome(
@@ -691,6 +1318,10 @@ class PostgresDurableEffectStore:
                 intent_evidence=intent,
                 outcome=parsed_outcome,
                 outcome_evidence=parsed_evidence,
+                execution_attempt_id=stored.execution_attempt_id,
+                owner_generation=stored.owner_generation,
+                lease_expires_at=stored.lease_expires_at,
+                last_renewed_at=stored.last_renewed_at,
             ).snapshot()
         return stored
 
@@ -716,6 +1347,84 @@ def _parse_inputs(
     )
     parsed_grant = AuthorizationGrant(grant, expected_tenant=actor["tenant_id"]).to_dict()
     return actor, parsed_request, parsed_policy, parsed_approvals, parsed_grant
+
+
+def _validate_lifecycle_authority(
+    actor: Mapping[str, Any],
+    request: Mapping[str, Any],
+    policy: Mapping[str, Any],
+    *,
+    approval: Mapping[str, Any] | None = None,
+    grant: Mapping[str, Any] | None = None,
+) -> None:
+    if (
+        request["actor_context_digest"] != sha256_digest(actor)
+        or request["tenant_id"] != actor["tenant_id"]
+        or request["actor_id"] != actor["actor_id"]
+        or policy["tenant_id"] != actor["tenant_id"]
+        or policy["request_id"] != request["request_id"]
+        or policy["request_digest"] != request["request_digest"]
+    ):
+        raise DurableStoreError("lifecycle identity, request, or policy binding is invalid")
+    if approval is not None:
+        if (
+            policy["decision"] != "require_approval"
+            or approval["request_id"] != request["request_id"]
+            or approval["request_digest"] != request["request_digest"]
+            or approval["policy_decision_id"] != policy["decision_id"]
+            or approval["policy_decision_digest"] != policy["decision_digest"]
+            or approval["disposition"] != "approved"
+            or not approval["separation_of_duties"]["satisfied"]
+            or approval["constraints"] != policy["constraints"]
+            or _parse_time(approval["issued_at"]) < _parse_time(policy["decided_at"])
+            or _parse_time(approval["expires_at"]) <= _parse_time(approval["issued_at"])
+        ):
+            raise DurableStoreError("lifecycle approval binding or chronology is invalid")
+    if grant is not None:
+        expected_refs = (
+            [
+                {
+                    "record_type": "approval_record",
+                    "record_id": approval["approval_id"],
+                    "record_digest": approval["approval_digest"],
+                }
+            ]
+            if approval is not None
+            else []
+        )
+        authority_time = (
+            _parse_time(approval["issued_at"])
+            if approval is not None
+            else _parse_time(policy["decided_at"])
+        )
+        if (
+            grant["tenant_id"] != actor["tenant_id"]
+            or grant["actor_id"] != actor["actor_id"]
+            or grant["run_id"] != request["run_id"]
+            or grant["request_id"] != request["request_id"]
+            or grant["request_digest"] != request["request_digest"]
+            or grant["policy_decision_id"] != policy["decision_id"]
+            or grant["policy_decision_digest"] != policy["decision_digest"]
+            or grant["approval_refs"] != expected_refs
+            or grant["constraints"] != policy["constraints"]
+            or grant["isolation_profile"] != policy["isolation_profile"]
+            or grant["idempotency"] != request["idempotency"]
+            or grant["tool_id"] != request["tool_id"]
+            or grant["tool_version"] != request["tool_version"]
+            or _parse_time(grant["issued_at"]) < authority_time
+            or _parse_time(grant["expires_at"]) <= _parse_time(grant["issued_at"])
+        ):
+            raise DurableStoreError("lifecycle grant binding or chronology is invalid")
+
+
+def _require_policy_ref(policy_ref: Mapping[str, str], policy: Mapping[str, Any]) -> None:
+    expected = {
+        "record_type": "policy_decision",
+        "record_id": policy["decision_id"],
+        "record_digest": policy["decision_digest"],
+    }
+    if dict(policy_ref) != expected:
+        raise DurableStoreError("evidence policy reference is not exactly bound")
 
 
 def _require_exact(
@@ -891,8 +1600,9 @@ def _validate_outcome_evidence(
         "outcome_digest": outcome["outcome_digest"],
         "status": outcome["status"],
     }
-    if outcome["status"] == "indeterminate":
-        expected_payload["recovery"] = "explicit"
+    actual_payload = draft.get("inline_payload")
+    if isinstance(actual_payload, Mapping) and "recovery" in actual_payload:
+        expected_payload["recovery"] = "lease_expired"
     if (
         draft.get("event_kind") != "kernel.effect_execution_outcome"
         or draft.get("run_id") != stored.request["run_id"]
@@ -904,6 +1614,65 @@ def _validate_outcome_evidence(
 
 def _json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _runtime_read(
+    cursor: Any, actor: Mapping[str, Any], operation: str, payload: Mapping[str, Any]
+) -> Any:
+    cursor.execute(
+        "SELECT gah_runtime_read(%s, %s::jsonb, %s::jsonb)",
+        (operation, _json(actor), _json(payload)),
+    )
+    row = cursor.fetchone()
+    return row[0] if row is not None else None
+
+
+def _runtime_write(
+    cursor: Any, actor: Mapping[str, Any], operation: str, payload: Mapping[str, Any]
+) -> Any:
+    functions = {
+        "lock_run": "gah_lock_run",
+        "commit_evidence": "gah_commit_evidence",
+        "insert_lifecycle": "gah_submit_lifecycle",
+        "approve_lifecycle": "gah_accept_approval",
+        "grant_lifecycle": "gah_issue_grant",
+        "rebuild_lifecycle": "gah_rebuild_lifecycle",
+        "insert_effect": "gah_prepare_effect",
+        "renew_effect": "gah_renew_effect",
+        "complete_effect": "gah_complete_effect",
+        "recover_effect": "gah_recover_effect",
+    }
+    function_name = functions.get(operation)
+    if function_name is None:
+        raise DurableStoreError("authority write operation is not supported")
+    from psycopg import sql
+
+    cursor.execute(
+        sql.SQL("SELECT {}(%s::jsonb, %s::jsonb)").format(sql.Identifier(function_name)),
+        (_json(actor), _json(payload)),
+    )
+    row = cursor.fetchone()
+    return row[0] if row is not None else None
+
+
+def _effect_row(value: Mapping[str, Any]) -> tuple[Any, ...]:
+    return (
+        value["actor_context_json"],
+        value["request_json"],
+        value["policy_json"],
+        value["approvals_json"],
+        value["grant_json"],
+        value["binding_digest"],
+        value["state"],
+        value["version"],
+        value["intent_envelope_json"],
+        value.get("outcome_json"),
+        value.get("outcome_envelope_json"),
+        value["execution_attempt_id"],
+        value["owner_generation"],
+        _parse_time(value["lease_expires_at"]),
+        _parse_time(value["last_renewed_at"]),
+    )
 
 
 def _lock_key(value: str) -> int:
