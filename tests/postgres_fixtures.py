@@ -111,7 +111,7 @@ def postgres_connections(postgres_server: dict[str, str], tmp_path: Path):
     with reset.cursor() as cursor:
         cursor.execute(
             "TRUNCATE gah_grant_consumptions, gah_effect_executions, "
-            "gah_request_lifecycle, gah_evidence_events, gah_run_heads"
+            "gah_request_lifecycle, gah_evidence_events, gah_run_heads, gah_memory_records"
         )
     reset.close()
     app_values = {**admin_values, "user": "gah_app"}
@@ -157,6 +157,7 @@ def postgres_connections(postgres_server: dict[str, str], tmp_path: Path):
             "DELETE FROM gah_request_lifecycle WHERE request_id = %s",
             (request_id,),
         ),
+        "seed_memory": lambda record: _seed_memory(admin_values, record),
     }
     cleanup = psycopg.connect(**admin_values)
     cleanup.autocommit = True
@@ -186,6 +187,42 @@ def _admin_update(values, statement, parameters) -> None:
     connection = psycopg.connect(**values)
     with connection, connection.cursor() as cursor:
         cursor.execute(statement, parameters)
+
+
+def _seed_memory(values, record) -> None:
+    import psycopg
+
+    connection = psycopg.connect(**values)
+    with connection, connection.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO gah_memory_records ("
+            "tenant_id, actor_id, memory_id, revision, record_digest, record_json, "
+            "scope_json, proposition_json, observed_at, effective_from, effective_until, "
+            "expires_at, lifecycle_state"
+            ") VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, "
+            "%s::timestamptz, %s::timestamptz, %s::timestamptz, %s::timestamptz, %s)",
+            (
+                record["tenant_id"],
+                record["scope"]["actor_id"],
+                record["memory_id"],
+                record["revision"],
+                record["record_digest"],
+                _json(record),
+                _json(record["scope"]),
+                _json(record["proposition"]),
+                record["observed_at"],
+                record["effective_from"],
+                record["effective_until"],
+                record["expires_at"],
+                record["lifecycle_state"],
+            ),
+        )
+
+
+def _json(value) -> str:
+    import json
+
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def _unavailable(message: str) -> None:

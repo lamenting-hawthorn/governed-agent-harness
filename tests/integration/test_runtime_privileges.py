@@ -17,6 +17,7 @@ TABLES = (
     "gah_request_lifecycle",
     "gah_effect_executions",
     "gah_grant_consumptions",
+    "gah_memory_records",
 )
 
 
@@ -44,11 +45,14 @@ def test_runtime_and_owner_roles_are_least_privilege(postgres_connections):
         cursor.execute(
             "SELECT has_function_privilege('gah_app', "
             "'gah_runtime_read(text,jsonb,jsonb)', 'EXECUTE'), "
+            "has_function_privilege('gah_app', 'gah_retrieve_memory(jsonb,jsonb)', 'EXECUTE'), "
             "has_function_privilege('gah_app', 'gah_submit_lifecycle(jsonb,jsonb)', 'EXECUTE'), "
             "has_function_privilege('gah_writer', 'gah_submit_lifecycle(jsonb,jsonb)', 'EXECUTE'), "
+            "has_function_privilege('gah_writer', 'gah_retrieve_memory(jsonb,jsonb)', 'EXECUTE'), "
+            "has_function_privilege('public', 'gah_retrieve_memory(jsonb,jsonb)', 'EXECUTE'), "
             "has_function_privilege('public', 'gah_submit_lifecycle(jsonb,jsonb)', 'EXECUTE')"
         )
-        assert cursor.fetchone() == (True, False, True, False)
+        assert cursor.fetchone() == (True, True, False, True, False, False, False)
         cursor.execute(
             "SELECT has_function_privilege('gah_app', "
             "'gah_authority_write_internal(text,jsonb,jsonb)', 'EXECUTE'), "
@@ -126,6 +130,11 @@ def test_runtime_cannot_use_direct_sql_migrations_or_ungranted_functions(
             "INSERT INTO gah_run_heads (tenant_id, actor_id, run_id) VALUES ('x','x','x')",
             "UPDATE gah_effect_executions SET state = 'completed'",
             "DELETE FROM gah_evidence_events",
+            "SELECT * FROM gah_memory_records",
+            "INSERT INTO gah_memory_records (tenant_id, actor_id, memory_id, revision, "
+            "record_digest, record_json, scope_json, proposition_json, observed_at, "
+            "effective_from, lifecycle_state) VALUES ('x','x','x',1,'sha256:x','{}','{}','{}',"
+            "clock_timestamp(),clock_timestamp(),'active')",
             "UPDATE gah_schema_migrations SET checksum = 'sha256:' || repeat('0',64)",
             "ALTER TABLE gah_request_lifecycle ADD COLUMN forged text",
             "SELECT pg_read_file('postgresql.conf')",
@@ -147,6 +156,13 @@ def test_runtime_function_scope_cannot_forge_tenant_actor_or_authority(postgres_
             with pytest.raises(Exception, match="outside actor scope"):
                 cursor.execute(
                     "SELECT gah_runtime_read('events', %s::jsonb, '{}'::jsonb)",
+                    (json.dumps(forged),),
+                )
+            connection.rollback()
+            with pytest.raises(Exception, match="outside actor scope"):
+                cursor.execute(
+                    "SELECT gah_retrieve_memory(%s::jsonb, "
+                    '\'{"record_type":"memory_query"}\'::jsonb)',
                     (json.dumps(forged),),
                 )
             connection.rollback()

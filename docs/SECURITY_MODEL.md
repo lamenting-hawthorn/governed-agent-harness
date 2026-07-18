@@ -134,6 +134,14 @@ carry an attempt ID, generation, lease expiry, and renewal time. A stale owner
 cannot append terminal evidence after expiry or recovery wins the atomic fence.
 Lease expiry records ambiguity as `indeterminate`; it never authorizes retry.
 
+The same runtime role has no direct access to governed-memory rows. Its only
+memory capability is actor-scoped `retrieve_memory`: the database cross-checks
+the schema-validated actor against the provisioned runtime login, applies
+forced RLS, and returns only active latest revisions through a restricted
+fixed-search-path function. It cannot seed, promote, revise, tombstone, or
+alter memory records. This is a deterministic read-only PostgreSQL slice, not
+sandboxing, hosted isolation, or a general knowledge-provider claim.
+
 ## Tool and sandbox boundary
 
 Tools are registered by immutable ID and version with input/output schemas,

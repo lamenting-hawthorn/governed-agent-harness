@@ -56,6 +56,13 @@ state, lease renewal/expiry, stale-owner rejection, and concurrent
 completion-versus-recovery fencing. In-memory or SQLite substitutes do not
 satisfy this gate.
 
+The in-progress governed-memory retrieval slice additionally proves on that
+real server that the runtime role cannot read or write memory tables directly,
+cannot forge a tenant or actor through the retrieval function, and receives
+only deterministic active latest revisions within its exact actor scope. Tests
+cover revision tombstones, temporal bounds, restart-equivalent reads, and
+rejected project-scoped queries. There is no automatic memory-promotion path.
+
 ## End-to-end reference story
 
 The release E2E test starts from a clean machine/container and must:

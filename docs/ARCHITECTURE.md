@@ -142,7 +142,7 @@ flowchart LR
   Foundation["1. Contract foundation\nschemas, validation, fixtures, packaging"]:::done
   Kernel["2. Governance kernel\nidentity, policy, approvals, lifecycle"]:::done
   Effects["3. Governed effects\ngrant, broker, synthetic executor, evidence"]:::done
-  State["4. Durable state\nledger, projections, memory, skills"]:::planned
+  State["4. Durable state\nledger, projections, read-only memory retrieval"]:::inprogress
   Surfaces["5. Product surfaces\nCLI, SDK, HTTP, MCP, diagnostics"]:::planned
   Operations["6. Operations + integrations\nhosted tenancy, observability, recovery,\nSkillLoop and Governed Agent Architecture adapters"]:::planned
   Release["7. Stable release\nconformance, security review, migration,\nSBOM, signed artifacts, support boundaries"]:::planned
@@ -150,6 +150,7 @@ flowchart LR
   Foundation --> Kernel --> Effects --> State --> Surfaces --> Operations --> Release
 
   classDef done stroke-width:2px
+  classDef inprogress stroke-width:2px,stroke-dasharray:5 5
   classDef planned stroke-dasharray:5 5
 ```
 
@@ -158,7 +159,7 @@ flowchart LR
 | Contract foundation | Schemas, canonicalization, semantic validation, fixtures, wheel | Implemented and covered by the contract suite |
 | Governance kernel | Trusted identity, deterministic policy, approvals, evidence-first in-memory lifecycle state | Implemented and covered by public-flow, negative-path, and adversarial kernel tests |
 | Governed effects | Exact short-lived grant, sole broker, injected executor port, intent and outcome evidence | Implemented for one reversible in-process synthetic executor plus the optional PostgreSQL Phase 4 durability slice; no provider or sandbox proof |
-| Durable state | Evidence ledger, projections, governed memory, skill lifecycle | Restart, idempotency, replay, isolation, and recovery tests |
+| Durable state | PostgreSQL evidence ledger/projections, fenced recovery, actor-scoped read-only memory retrieval | In progress: real PostgreSQL migration, RLS, restart, idempotency, replay, recovery, and retrieval-isolation proof; promotion and skills remain deferred |
 | Product surfaces | CLI, SDK, HTTP/MCP, diagnostics, run inspection | One documented workflow through every supported surface |
 | Operations and integrations | Hosted storage, tenant controls, telemetry, backup/restore, optional adapters | Cross-backend conformance and operational exercises |
 | Stable release | Compatibility policy, migrations, security review, SBOM, signed artifacts | Published release evidence and explicit support boundaries |

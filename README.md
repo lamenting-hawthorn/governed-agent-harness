@@ -235,7 +235,7 @@ flowchart LR
   Foundation["1. Contract foundation"]:::done
   Kernel["2. Governance kernel"]:::done
   Effects["3. Governed effects"]:::done
-  State["4. Durable state"]:::planned
+  State["4. Durable state"]:::inprogress
   Product["5. Product surfaces"]:::planned
   Operations["6. Hosted operations\n+ integrations"]:::planned
   Stable["7. Stable release"]:::planned
@@ -243,6 +243,7 @@ flowchart LR
   Foundation --> Kernel --> Effects --> State --> Product --> Operations --> Stable
 
   classDef done stroke-width:2px
+  classDef inprogress stroke-width:2px,stroke-dasharray:5 5
   classDef planned stroke-dasharray:5 5
 ```
 
@@ -251,7 +252,7 @@ flowchart LR
 | Contract foundation | Schemas, validation, fixtures, packaging | Implemented and covered by the contract suite |
 | Governance kernel | In-process identity propagation through an injected trust boundary, deterministic policy, exact approval binding, in-memory evidence-first lifecycle state | Implemented and covered by lifecycle tests |
 | Governed effects | Exact short-lived grant, sole effect broker, injected executor port, intent and outcome evidence | Implemented for one reversible in-process synthetic executor with no sandbox claim |
-| Durable state | Ledger, projections, memory, skills | Restart, replay, isolation, idempotency, and recovery tests |
+| Durable state | PostgreSQL ledger/projections, fenced recovery, and actor-scoped read-only memory retrieval | In progress: real PostgreSQL migration, RLS, restart, replay, recovery, and retrieval-isolation proof; memory promotion and skills remain deferred |
 | Product surfaces | CLI, SDK, HTTP/MCP, diagnostics | Documented feature-level workflows through supported surfaces |
 | Hosted operations and integrations | Tenant controls, telemetry, backup/restore, optional adapters | Cross-backend conformance and operational exercises |
 | Stable release | Compatibility, migrations, security review, SBOM, signed artifacts | Published evidence and explicit support boundaries |

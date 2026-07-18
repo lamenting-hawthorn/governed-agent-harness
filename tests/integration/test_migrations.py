@@ -52,6 +52,7 @@ def test_packaged_migrations_are_contiguous_and_checksum_exact() -> None:
         (1, "0001_durable_effects.sql"),
         (2, "0002_fenced_lifecycle.sql"),
         (3, "0003_runtime_api.sql"),
+        (4, "0004_read_only_memory_retrieval.sql"),
     ]
     assert migrations[0].checksum.startswith("sha256:")
     assert len(migrations[0].checksum) == 71
@@ -99,7 +100,10 @@ def test_fresh_install_registers_migration_and_is_idempotent(
             "SELECT version, checksum, applied_at IS NOT NULL FROM gah_schema_migrations"
         )
         rows = cursor.fetchall()
-        cursor.execute("SELECT to_regclass('gah_run_heads'), to_regclass('gah_effect_executions')")
+        cursor.execute(
+            "SELECT to_regclass('gah_run_heads'), to_regclass('gah_effect_executions'), "
+            "to_regclass('gah_memory_records')"
+        )
         tables = cursor.fetchone()
     assert rows == [(item.version, item.checksum, True) for item in first]
     assert second == first
@@ -122,7 +126,7 @@ def test_advisory_lock_serializes_concurrent_fresh_installers(
         )
         rows = cursor.fetchall()
     assert results[0] == results[1]
-    assert rows == [(1, 1), (2, 1), (3, 1)]
+    assert rows == [(1, 1), (2, 1), (3, 1), (4, 1)]
 
 
 def test_exact_phase4_schema_is_registered_without_reexecution(
@@ -253,6 +257,13 @@ def test_fencing_and_lifecycle_schema_are_installed_with_restricted_roles(
             "SELECT has_table_privilege('gah_runtime', 'gah_request_lifecycle', 'SELECT')"
         )
         runtime_can_select = cursor.fetchone()[0]
+        cursor.execute(
+            "SELECT relrowsecurity, relforcerowsecurity, pg_get_userbyid(relowner), "
+            "has_table_privilege('gah_runtime', 'gah_memory_records', 'SELECT'), "
+            "has_function_privilege('gah_runtime', 'gah_retrieve_memory(jsonb,jsonb)', 'EXECUTE') "
+            "FROM pg_class WHERE oid = 'gah_memory_records'::regclass"
+        )
+        memory_security = cursor.fetchone()
     assert attempt_columns == [
         ("execution_attempt_id", True),
         ("last_renewed_at", True),
@@ -266,6 +277,7 @@ def test_fencing_and_lifecycle_schema_are_installed_with_restricted_roles(
         ("gah_schema_owner", False, False, False),
     ]
     assert runtime_can_select is False
+    assert memory_security == (True, True, "gah_schema_owner", False, True)
 
 
 def test_altered_phase4_schema_is_rejected(migration_database: dict[str, object]) -> None:
@@ -310,10 +322,10 @@ def test_checksum_drift_and_unknown_version_are_rejected(
             (discover_migrations()[0].checksum,),
         )
         cursor.execute(
-            "INSERT INTO gah_schema_migrations (version, checksum) VALUES (4, %s)",
+            "INSERT INTO gah_schema_migrations (version, checksum) VALUES (5, %s)",
             ("sha256:" + "1" * 64,),
         )
-    with pytest.raises(MigrationError, match="unknown migration version 0004"):
+    with pytest.raises(MigrationError, match="unknown migration version 0005"):
         apply_migrations(admin_connect=connect)
 
 
@@ -341,8 +353,8 @@ def test_failed_migration_rolls_back_registry_and_schema(
 
     packaged = discover_migrations()
     broken = Migration(
-        version=4,
-        name="0004_broken.sql",
+        version=5,
+        name="0005_broken.sql",
         checksum="sha256:" + "2" * 64,
         sql="CREATE TABLE gah_partial (id integer); SELECT definitely_not_a_function()",
     )

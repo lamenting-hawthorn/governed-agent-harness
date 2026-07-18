@@ -90,8 +90,12 @@ require policy or human resolution.
 ## Scope and authorization
 
 Memory scope is part of identity, not a search filter supplied by the caller.
-The kernel derives allowed tenant, actor, project, and workspace scopes before
-querying a provider. Providers receive a scoped query and must enforce it again.
+The implemented Phase 4 slice exposes only
+`retrieve_memory(actor_context, memory_query)`: it schema-validates the
+`ActorContext`, derives tenant and actor scope from it, and currently accepts
+only its exact actor-level scope. PostgreSQL maps each runtime login to that one
+tenant/actor pair, forces RLS, and permits retrieval only through a fixed
+search-path read function. The caller never supplies SQL tenant authority.
 
 Cross-tenant retrieval is forbidden. Shared memories use explicit group or
 project grants; they are not created by omitting `actorId`. Retrieval results
@@ -99,28 +103,13 @@ carry the scope used to authorize them.
 
 ## Retrieval
 
-```ts
-type MemoryQuery = {
-  text: string;
-  types?: Array<"semantic" | "episodic" | "procedural">;
-  asOf?: string;
-  limit: number;
-  filters?: { projectId?: string; authority?: string[]; sensitivity?: string[] };
-};
-
-type RetrievedMemory = {
-  record: MemoryRecord;
-  score: number;
-  scoreComponents: Record<string, number>;
-  evidence: EvidenceReference[];
-  authorization: { scope: string; grantId?: string };
-};
-```
-
-The provider may combine lexical, vector, graph, recency, authority, and usage
-signals. Fusion weights and embedding versions are configuration with digests.
-Results are deterministic for identical indexed state and configuration where
-the underlying algorithms permit it.
+The implemented query and record contracts are canonical JSON Schema models.
+The PostgreSQL reader selects the latest revision per record, excludes
+tombstoned, expired, and temporally out-of-bounds records, filters declared
+categories, and returns a deterministic lexical score/order. Results preserve
+the committed record's source-evidence and policy provenance, revision, scope,
+and lifecycle state. It is deliberately offline and provider-neutral: there is
+no embedding, model, automatic promotion, or write API in this slice.
 
 Retrieval output is capped by count and token/byte budget. Content is labeled as
 untrusted context so that stored prompt injection is not treated as instruction.
@@ -156,10 +145,10 @@ not mutable array position alone.
 
 ## Provider boundary
 
-The built-in local provider uses PGlite; hosted deployments use Postgres. Both
-implement the same domain behavior and conformance suite. Optional providers,
-including an adapter to Governed Agent Architecture, may implement
-search or storage ports but cannot bypass promotion policy or ledger events.
+This repository currently ships only the optional PostgreSQL read path above.
+No local PGlite provider, hosted deployment, or external provider adapter is
+implemented. Any future provider must retain the narrow actor-context boundary
+and cannot bypass promotion policy or ledger events.
 
 Provider capability manifests declare:
 

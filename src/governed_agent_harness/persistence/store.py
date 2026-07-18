@@ -18,10 +18,13 @@ from governed_agent_harness.contracts import (
     EvidenceEnvelope,
     IdempotencyConflictError,
     PolicyDecision,
+    MemoryQuery,
+    MemoryRecord,
     SemanticError,
     ToolRequest,
     apply_object_digest,
     sha256_digest,
+    validate_scope_narrowing,
 )
 
 
@@ -60,6 +63,19 @@ class StoredLifecycle:
             evidence=tuple(copy.deepcopy(dict(value)) for value in self.evidence),
             approval=copy.deepcopy(dict(self.approval)) if self.approval is not None else None,
             grant=copy.deepcopy(dict(self.grant)) if self.grant is not None else None,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievedMemory:
+    """One validated read-only memory result with deterministic relevance."""
+
+    record: Mapping[str, Any]
+    relevance_score: int
+
+    def snapshot(self) -> RetrievedMemory:
+        return RetrievedMemory(
+            record=copy.deepcopy(dict(self.record)), relevance_score=self.relevance_score
         )
 
 
@@ -194,6 +210,17 @@ class DurableEffectStore(Protocol):
         grant: Mapping[str, Any],
         policy_ref: Mapping[str, str],
     ) -> StoredLifecycle: ...
+
+
+class MemoryRetriever(Protocol):
+    """Read-only, actor-scoped governed memory boundary."""
+
+    def retrieve_memory(
+        self,
+        *,
+        actor_context: Mapping[str, Any],
+        memory_query: Mapping[str, Any],
+    ) -> tuple[RetrievedMemory, ...]: ...
 
 
 class _Connection(Protocol):
@@ -371,6 +398,46 @@ class PostgresDurableEffectStore:
         with self._runtime_connect() as connection, connection.cursor() as cursor:
             row = _runtime_read(cursor, actor, "effect_by_request", {"request_id": request_id})
         return self._row(_effect_row(row)) if row is not None else None
+
+    def retrieve_memory(
+        self, *, actor_context: Mapping[str, Any], memory_query: Mapping[str, Any]
+    ) -> tuple[RetrievedMemory, ...]:
+        """Return only active actor-scoped records through the restricted read role."""
+
+        actor = ActorContext(actor_context).to_dict()
+        query = MemoryQuery(memory_query, expected_tenant=actor["tenant_id"]).to_dict()
+        try:
+            validate_scope_narrowing(query["scope"], actor)
+        except SemanticError as error:
+            raise DurableStoreError(
+                "memory query scope is not derived from actor authority"
+            ) from error
+        if query["scope"]["selection"] != {"level": "actor"}:
+            raise DurableStoreError("read-only retrieval currently requires actor scope")
+        if _parse_time(query["scope"]["valid_until"]) < _aware_utc(self._clock()):
+            raise DurableStoreError("memory query scope is expired")
+        with self._runtime_connect() as connection, connection.cursor() as cursor:
+            rows = _retrieve_memory(cursor, actor, query)
+        matches: list[RetrievedMemory] = []
+        for row in rows:
+            score = row.pop("_relevance_score", None)
+            if not isinstance(score, int) or score < 1:
+                raise DurableStoreError("memory retrieval returned an invalid relevance score")
+            record = MemoryRecord(row, expected_tenant=actor["tenant_id"]).to_dict()
+            try:
+                validate_scope_narrowing(record["scope"], actor)
+            except SemanticError as error:
+                raise DurableStoreError(
+                    "memory record scope is not derived from actor authority"
+                ) from error
+            if (
+                record["scope"]["selection"] != query["scope"]["selection"]
+                or record["visibility"] != "actor"
+                or record["lifecycle_state"] != "active"
+            ):
+                raise DurableStoreError("memory retrieval returned an out-of-scope record")
+            matches.append(RetrievedMemory(record=record, relevance_score=score))
+        return tuple(match.snapshot() for match in matches)
 
     def append(
         self,
@@ -1625,6 +1692,20 @@ def _runtime_read(
     )
     row = cursor.fetchone()
     return row[0] if row is not None else None
+
+
+def _retrieve_memory(
+    cursor: Any, actor: Mapping[str, Any], query: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    cursor.execute(
+        "SELECT gah_retrieve_memory(%s::jsonb, %s::jsonb)",
+        (_json(actor), _json(query)),
+    )
+    row = cursor.fetchone()
+    value = row[0] if row is not None else []
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise DurableStoreError("memory retrieval returned malformed rows")
+    return value
 
 
 def _runtime_write(
