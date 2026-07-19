@@ -159,10 +159,31 @@ flowchart LR
 | Contract foundation | Schemas, canonicalization, semantic validation, fixtures, wheel | Implemented and covered by the contract suite |
 | Governance kernel | Trusted identity, deterministic policy, approvals, evidence-first in-memory lifecycle state | Implemented and covered by public-flow, negative-path, and adversarial kernel tests |
 | Governed effects | Exact short-lived grant, sole broker, injected executor port, intent and outcome evidence | Implemented for one reversible in-process synthetic executor plus the optional PostgreSQL Phase 4 durability slice; no provider or sandbox proof |
-| Durable state | PostgreSQL evidence ledger/projections, fenced recovery, actor-scoped read-only memory retrieval | In progress: real PostgreSQL migration, RLS, restart, idempotency, replay, recovery, and retrieval-isolation proof; promotion and skills remain deferred |
+| Durable state | PostgreSQL evidence ledger/projections, fenced recovery, actor-scoped read-only memory retrieval, governed promotion, durable skills | In progress: Phases 4.1 and 4.2 are shipped; Phase 4.3 owns authority-only evidence-backed promotion; skills require a separate completion decision |
 | Product surfaces | CLI, SDK, HTTP/MCP, diagnostics, run inspection | One documented workflow through every supported surface |
 | Operations and integrations | Hosted storage, tenant controls, telemetry, backup/restore, optional adapters | Cross-backend conformance and operational exercises |
 | Stable release | Compatibility policy, migrations, security review, SBOM, signed artifacts | Published release evidence and explicit support boundaries |
+
+### Current Phase 4 status
+
+- **Shipped:** durable pre-effect lifecycle evidence and rebuildable projection;
+  atomic intent/grant consumption; fenced lease recovery; checksummed
+  migrations; separated PostgreSQL roles and forced RLS; actor-scoped read-only
+  memory retrieval with deterministic ranking, provenance, revisions,
+  tombstones, temporal bounds, and result limits.
+- **Phase 4.3:** accept a validated `MemoryProposal` only with resolvable source
+  evidence and an exact bound policy decision/approval; atomically append
+  canonical evidence and create, revise, supersede, or tombstone the
+  authoritative memory record through authority-only database functions.
+- **Still deferred:** automatic/model-driven promotion, embeddings, external
+  providers, project/shared retrieval, hosted operations, transports, product
+  surfaces, and provider-specific effects.
+
+Phase 5 does not start merely because read-only retrieval shipped. Phase 4.3
+must prove idempotency, conflict handling, retention/expiry, projection rebuild,
+restart, concurrent promotion, and tenant/actor isolation on real PostgreSQL.
+Durable skills must then be implemented or explicitly removed from the Phase 4
+completion boundary through a reviewed roadmap decision.
 
 ## Design invariants
 

@@ -23,7 +23,11 @@ transport, storage product, or learning workflow.
 > after restart. Checksummed migrations fail closed on drift. Fenced execution
 > attempts use database leases and permit indeterminate recovery only after
 > expiry; stale owners cannot append terminal evidence. The deterministic executor
-> remains injected and synthetic; `isolation_profile="none"` is not a sandbox.
+> remains injected and synthetic. Phase 4.2 adds actor-scoped, read-only memory
+> retrieval through a restricted PostgreSQL function with forced RLS,
+> deterministic ranking, revision/tombstone/temporal filtering, provenance, and
+> result limits. Memory promotion and durable skills remain Phase 4 work;
+> `isolation_profile="none"` is not a sandbox.
 > Provider effects, transports, general sandboxing, and hosted
 > operations remain out of scope. This repository is not production-ready.
 
@@ -77,7 +81,8 @@ flowchart LR
 | Bounded governed effects | Implemented | Exact signed grant, one broker, intent-before-executor evidence, outcome evidence, replay/concurrency proof, and a reversible synthetic executor only |
 | Sandbox and provider executors | Planned | Requires independently proved isolation and provider-specific enforcement |
 | PostgreSQL governed lifecycle/effect authority | Implemented, bounded | Checksummed migrations, canonical lifecycle evidence, rebuildable projection, runtime-role/RLS tests, atomic prepare/consume, fenced leases, replay, restart, concurrency, and expired-lease recovery |
-| Durable runtime storage and governed memory | Planned | Requires broader restart, isolation, and recovery proof |
+| Actor-scoped governed memory retrieval | Implemented, bounded | PostgreSQL-only read path; latest revisions, tombstones, temporal/category filters, provenance, limits, restart equivalence, and adversarial role/RLS proof |
+| Governed memory promotion and durable skills | Phase 4 in progress | Promotion must atomically bind source evidence and policy/approval to an authority-only revision; skills remain a separate completion decision |
 | CLI, SDK, HTTP/MCP, and hosted operations | Planned | Requires feature-level integration evidence |
 
 ## Contract foundation
@@ -252,7 +257,7 @@ flowchart LR
 | Contract foundation | Schemas, validation, fixtures, packaging | Implemented and covered by the contract suite |
 | Governance kernel | In-process identity propagation through an injected trust boundary, deterministic policy, exact approval binding, in-memory evidence-first lifecycle state | Implemented and covered by lifecycle tests |
 | Governed effects | Exact short-lived grant, sole effect broker, injected executor port, intent and outcome evidence | Implemented for one reversible in-process synthetic executor with no sandbox claim |
-| Durable state | PostgreSQL ledger/projections, fenced recovery, and actor-scoped read-only memory retrieval | In progress: real PostgreSQL migration, RLS, restart, replay, recovery, and retrieval-isolation proof; memory promotion and skills remain deferred |
+| Durable state | PostgreSQL ledger/projections, fenced recovery, actor-scoped read-only memory retrieval, then governed promotion and skills | In progress: Phases 4.1 and 4.2 are shipped; Phase 4.3 is the authority-only evidence-backed promotion boundary; skills remain a separate Phase 4 decision |
 | Product surfaces | CLI, SDK, HTTP/MCP, diagnostics | Documented feature-level workflows through supported surfaces |
 | Hosted operations and integrations | Tenant controls, telemetry, backup/restore, optional adapters | Cross-backend conformance and operational exercises |
 | Stable release | Compatibility, migrations, security review, SBOM, signed artifacts | Published evidence and explicit support boundaries |

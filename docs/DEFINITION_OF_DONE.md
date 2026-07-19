@@ -44,7 +44,27 @@ Additionally:
 - learning import cannot mutate live runtime without validated, versioned
   installation and required approval; and
 - the evidence integrity verifier detects fixture mutation, deletion, reorder,
-  and sequence gaps.
+and sequence gaps.
+
+## Phase 4 durable-state exit gate
+
+Phase 4 is not complete until the shipped lifecycle/effect authority and
+actor-scoped read-only retrieval are joined by an evidence-backed governed
+memory-promotion path. That path must prove on real PostgreSQL that:
+
+- promotion without resolvable same-tenant evidence and an exact bound policy
+  decision/approval has zero successful paths;
+- create, revision, supersession, tombstone, retention, expiry, idempotency,
+  replay, restart, and concurrent conflict behavior preserve one authoritative
+  history;
+- runtime roles cannot directly mutate records, invoke authority-only
+  transitions, forge scope, or bypass forced RLS; and
+- canonical evidence append and authoritative revision persistence are atomic,
+  while projections remain rebuildable and never become authorization truth.
+
+Durable skills remain a separate Phase 4 deliverable. Before Phase 5 starts,
+skills must either pass their own lifecycle/integrity/restart gate or be removed
+from the Phase 4 completion boundary by an explicit reviewed roadmap change.
 
 ## First usable release gate
 

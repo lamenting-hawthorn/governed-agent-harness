@@ -161,11 +161,33 @@ Provider capability manifests declare:
 
 Missing required behavior fails configuration validation.
 
+## Phase 4.3 promotion boundary
+
+Phase 4.2 intentionally has no runtime memory-write API. Phase 4.3 adds the
+smallest governed promotion boundary with these invariants:
+
+- a schema-valid `MemoryProposal` references resolvable same-tenant source
+  evidence;
+- the policy decision and any approval bind the exact proposal digest, actor,
+  scope, retention, validity, and requested lifecycle operation;
+- the runtime role retains no direct table DML and cannot call promotion
+  functions; only the distinct authority path may create, revise, supersede, or
+  tombstone records;
+- canonical promotion evidence and the authoritative memory revision are
+  committed atomically with optimistic concurrency and idempotency; and
+- failures, conflicts, stale revisions, expired authority, and validation errors
+  produce no record, invalid transition, or alternate authorization truth.
+
+The evidence ledger remains authoritative. Any retrieval/index structure is a
+rebuildable projection. Automatic promotion, model self-approval, provider
+integration, embeddings, and shared/project scopes are outside this slice.
+
 ## Indexing and consistency
 
-Committed records are authoritative before their search indexes. Promotion
-appends the event and durable record in one transaction, then creates a durable
-indexing task. Retrieval declares a consistency mode:
+Committed records are authoritative before their search indexes. The planned
+promotion path appends the event and durable record in one transaction, then
+creates a durable indexing task. A future indexed provider may declare a
+consistency mode:
 
 - `committed`: query authoritative fields, possibly with reduced ranking;
 - `indexed`: require projection to have reached a supplied ledger position;
