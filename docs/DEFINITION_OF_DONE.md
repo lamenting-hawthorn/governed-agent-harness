@@ -48,9 +48,9 @@ and sequence gaps.
 
 ## Phase 4 durable-state exit gate
 
-Phase 4 is not complete until the shipped lifecycle/effect authority and
-actor-scoped read-only retrieval are joined by an evidence-backed governed
-memory-promotion path. That path must prove on real PostgreSQL that:
+The lifecycle/effect authority and actor-scoped read-only retrieval are now
+joined by the bounded Phase 4.3 evidence-backed promotion path. Its real
+PostgreSQL gate proves that:
 
 - promotion without resolvable same-tenant evidence and an exact bound policy
   decision/approval has zero successful paths;

@@ -18,6 +18,7 @@ TABLES = (
     "gah_effect_executions",
     "gah_grant_consumptions",
     "gah_memory_records",
+    "gah_memory_transitions",
 )
 
 
@@ -60,6 +61,20 @@ def test_runtime_and_owner_roles_are_least_privilege(postgres_connections):
             "'gah_authority_write_internal(text,jsonb,jsonb)', 'EXECUTE')"
         )
         assert cursor.fetchone() == (False, False)
+        cursor.execute(
+            "SELECT "
+            "has_function_privilege('gah_app', "
+            "'gah_commit_memory_transition(jsonb,jsonb)', 'EXECUTE'), "
+            "has_function_privilege('gah_app', "
+            "'gah_rebuild_memory_projection(jsonb,jsonb)', 'EXECUTE'), "
+            "has_function_privilege('gah_writer', "
+            "'gah_commit_memory_transition(jsonb,jsonb)', 'EXECUTE'), "
+            "has_function_privilege('gah_writer', "
+            "'gah_rebuild_memory_projection(jsonb,jsonb)', 'EXECUTE'), "
+            "has_function_privilege('public', "
+            "'gah_commit_memory_transition(jsonb,jsonb)', 'EXECUTE')"
+        )
+        assert cursor.fetchone() == (False, False, True, True, False)
 
 
 def test_installer_rejects_collapsed_runtime_and_authority_role(postgres_connections):
@@ -131,6 +146,7 @@ def test_runtime_cannot_use_direct_sql_migrations_or_ungranted_functions(
             "UPDATE gah_effect_executions SET state = 'completed'",
             "DELETE FROM gah_evidence_events",
             "SELECT * FROM gah_memory_records",
+            "SELECT * FROM gah_memory_transitions",
             "INSERT INTO gah_memory_records (tenant_id, actor_id, memory_id, revision, "
             "record_digest, record_json, scope_json, proposition_json, observed_at, "
             "effective_from, lifecycle_state) VALUES ('x','x','x',1,'sha256:x','{}','{}','{}',"
@@ -177,6 +193,8 @@ def test_runtime_function_scope_cannot_forge_tenant_actor_or_authority(postgres_
             "gah_renew_effect",
             "gah_complete_effect",
             "gah_recover_effect",
+            "gah_commit_memory_transition",
+            "gah_rebuild_memory_projection",
         ):
             with pytest.raises(Exception, match="permission denied"):
                 cursor.execute(

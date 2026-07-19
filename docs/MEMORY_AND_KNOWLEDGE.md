@@ -105,11 +105,13 @@ carry the scope used to authorize them.
 
 The implemented query and record contracts are canonical JSON Schema models.
 The PostgreSQL reader selects the latest revision per record, excludes
-tombstoned, expired, and temporally out-of-bounds records, filters declared
-categories, and returns a deterministic lexical score/order. Results preserve
-the committed record's source-evidence and policy provenance, revision, scope,
-and lifecycle state. It is deliberately offline and provider-neutral: there is
-no embedding, model, automatic promotion, or write API in this slice.
+tombstoned, expired, retention-expired, and temporally out-of-bounds records,
+filters declared categories, and returns a deterministic lexical score/order.
+Both the record validity expiry and retention expiry are authoritative retrieval
+ceilings. Results preserve the committed record's source-evidence and policy
+provenance, revision, scope, and lifecycle state. It is deliberately offline
+and provider-neutral: there is no embedding or model. Promotion is a separate
+authority-only API; runtime retrieval remains read-only.
 
 Retrieval output is capped by count and token/byte budget. Content is labeled as
 untrusted context so that stored prompt injection is not treated as instruction.
@@ -163,11 +165,11 @@ Missing required behavior fails configuration validation.
 
 ## Phase 4.3 promotion boundary
 
-Phase 4.2 intentionally has no runtime memory-write API. Phase 4.3 adds the
+Phase 4.2 intentionally has no runtime memory-write API. Phase 4.3 implements the
 smallest governed promotion boundary with these invariants:
 
-- a schema-valid `MemoryProposal` references resolvable same-tenant source
-  evidence;
+- a schema-valid `MemoryProposal` references resolvable same-tenant, same-actor
+  whole-payload source evidence;
 - the policy decision and any approval bind the exact proposal digest, actor,
   scope, retention, validity, and requested lifecycle operation;
 - the runtime role retains no direct table DML and cannot call promotion
@@ -178,16 +180,18 @@ smallest governed promotion boundary with these invariants:
 - failures, conflicts, stale revisions, expired authority, and validation errors
   produce no record, invalid transition, or alternate authorization truth.
 
-The evidence ledger remains authoritative. Any retrieval/index structure is a
-rebuildable projection. Automatic promotion, model self-approval, provider
-integration, embeddings, and shared/project scopes are outside this slice.
+The evidence ledger remains authoritative. The PostgreSQL memory and transition
+tables are rebuildable projections. Automatic promotion, model self-approval,
+provider integration, embeddings, and shared/project scopes are outside this
+slice. Cross-memory supersession, partial evidence spans, physical deletion,
+and cryptographic erasure fail closed rather than claim unsupported semantics.
 
 ## Indexing and consistency
 
-Committed records are authoritative before their search indexes. The planned
-promotion path appends the event and durable record in one transaction, then
-creates a durable indexing task. A future indexed provider may declare a
-consistency mode:
+Committed records are authoritative before their search indexes. The implemented
+promotion path appends canonical evidence and its durable record projection in
+one transaction. Phase 4.3 creates no provider index or indexing task. A future
+indexed provider may declare a consistency mode:
 
 - `committed`: query authoritative fields, possibly with reduced ranking;
 - `indexed`: require projection to have reached a supplied ledger position;

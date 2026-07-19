@@ -402,6 +402,81 @@ def validate_scope_narrowing(scope: Any, parent: Any) -> None:
         )
 
 
+def validate_memory_promotion_bindings(
+    actor_context: Any,
+    proposal: Any,
+    memory_decision: Any,
+    policy_decision: Any,
+    approvals: Iterable[Any] = (),
+) -> None:
+    """Validate promotion's cross-record identity bindings before persistence."""
+
+    actor = _as_record(actor_context)
+    candidate_proposal = _as_record(proposal)
+    decision = _as_record(memory_decision)
+    policy = _as_record(policy_decision)
+    if candidate_proposal.get("target_scope") != candidate_proposal.get("proposed_record", {}).get(
+        "scope"
+    ):
+        raise SemanticError("memory proposal target scope is not the proposed record scope")
+    validate_scope_narrowing(candidate_proposal["target_scope"], actor)
+    if candidate_proposal["proposed_record"].get("tenant_id") != actor.get("tenant_id"):
+        raise SemanticError("memory proposal record tenant is not actor-scoped")
+    expected_proposal = {
+        "record_type": "memory_proposal",
+        "record_id": candidate_proposal["proposal_id"],
+        "record_digest": candidate_proposal["proposal_digest"],
+    }
+    if decision.get("proposal_ref") != expected_proposal:
+        raise SemanticError("memory decision does not bind the exact proposal")
+    if decision.get("actor_context_digest") != sha256_digest(actor):
+        raise SemanticError("memory decision does not bind the exact actor context")
+    expected_policy = {
+        "record_type": "policy_decision",
+        "record_id": policy["decision_id"],
+        "record_digest": policy["decision_digest"],
+    }
+    if decision.get("policy_refs") != [expected_policy]:
+        raise SemanticError("memory decision must reference only the supplied policy")
+    if (
+        policy.get("tenant_id") != actor.get("tenant_id")
+        or policy.get("request_id") != candidate_proposal.get("proposal_id")
+        or policy.get("request_digest") != candidate_proposal.get("proposal_digest")
+    ):
+        raise SemanticError("policy decision does not bind the exact proposal")
+    if policy.get("decision") not in {"authorize", "require_approval"}:
+        raise SemanticError("policy decision does not authorize promotion")
+    if policy.get("isolation_profile") != "no_effect":
+        raise SemanticError("memory promotion requires no_effect isolation")
+    if decision.get("disposition") != "accept":
+        raise SemanticError("memory decision does not accept the proposal")
+    if decision.get("constraints") != policy.get("constraints"):
+        raise SemanticError("memory decision constraints do not exactly match policy")
+    supplied = tuple(_as_record(value) for value in approvals)
+    if policy.get("decision") == "authorize" and supplied:
+        raise SemanticError("authorize promotion cannot carry approvals")
+    if policy.get("decision") == "require_approval" and not supplied:
+        raise SemanticError("approval-required promotion has no approval")
+    for approval in supplied:
+        if (
+            approval.get("tenant_id") != actor.get("tenant_id")
+            or approval.get("request_id") != candidate_proposal.get("proposal_id")
+            or approval.get("request_digest") != candidate_proposal.get("proposal_digest")
+            or approval.get("policy_decision_id") != policy.get("decision_id")
+            or approval.get("policy_decision_digest") != policy.get("decision_digest")
+            or approval.get("disposition") != "approved"
+            or "revoked_at" in approval
+            or approval.get("constraints") != policy.get("constraints")
+        ):
+            raise SemanticError("approval does not bind the exact proposal and policy")
+        duties = approval.get("separation_of_duties", {})
+        if duties.get("required") and (
+            not duties.get("satisfied")
+            or approval.get("approver_actor_id") == actor.get("actor_id")
+        ):
+            raise SemanticError("approval does not satisfy separation of duties")
+
+
 def _require_same(left: Mapping[str, Any], right: Mapping[str, Any], fields: Iterable[str]) -> None:
     for field in fields:
         if left.get(field) != right.get(field):

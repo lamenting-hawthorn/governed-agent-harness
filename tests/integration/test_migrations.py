@@ -53,6 +53,7 @@ def test_packaged_migrations_are_contiguous_and_checksum_exact() -> None:
         (2, "0002_fenced_lifecycle.sql"),
         (3, "0003_runtime_api.sql"),
         (4, "0004_read_only_memory_retrieval.sql"),
+        (5, "0005_governed_memory_promotion.sql"),
     ]
     assert migrations[0].checksum.startswith("sha256:")
     assert len(migrations[0].checksum) == 71
@@ -126,7 +127,7 @@ def test_advisory_lock_serializes_concurrent_fresh_installers(
         )
         rows = cursor.fetchall()
     assert results[0] == results[1]
-    assert rows == [(1, 1), (2, 1), (3, 1), (4, 1)]
+    assert rows == [(1, 1), (2, 1), (3, 1), (4, 1), (5, 1)]
 
 
 def test_exact_phase4_schema_is_registered_without_reexecution(
@@ -322,10 +323,10 @@ def test_checksum_drift_and_unknown_version_are_rejected(
             (discover_migrations()[0].checksum,),
         )
         cursor.execute(
-            "INSERT INTO gah_schema_migrations (version, checksum) VALUES (5, %s)",
+            "INSERT INTO gah_schema_migrations (version, checksum) VALUES (6, %s)",
             ("sha256:" + "1" * 64,),
         )
-    with pytest.raises(MigrationError, match="unknown migration version 0005"):
+    with pytest.raises(MigrationError, match="unknown migration version 0006"):
         apply_migrations(admin_connect=connect)
 
 
@@ -353,8 +354,8 @@ def test_failed_migration_rolls_back_registry_and_schema(
 
     packaged = discover_migrations()
     broken = Migration(
-        version=5,
-        name="0005_broken.sql",
+        version=6,
+        name="0006_broken.sql",
         checksum="sha256:" + "2" * 64,
         sql="CREATE TABLE gah_partial (id integer); SELECT definitely_not_a_function()",
     )

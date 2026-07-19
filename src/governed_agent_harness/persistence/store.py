@@ -16,15 +16,23 @@ from governed_agent_harness.contracts import (
     ApprovalRecord,
     AuthorizationGrant,
     EvidenceEnvelope,
+    ConstraintRegistry,
+    DetachedProofVerifier,
     IdempotencyConflictError,
+    MemoryDecision,
+    MemoryProposal,
     PolicyDecision,
     MemoryQuery,
     MemoryRecord,
     SemanticError,
     ToolRequest,
+    TrustContext,
     apply_object_digest,
     sha256_digest,
+    validate_constraint_support,
+    validate_memory_promotion_bindings,
     validate_scope_narrowing,
+    verify_signed_record,
 )
 
 
@@ -76,6 +84,52 @@ class RetrievedMemory:
     def snapshot(self) -> RetrievedMemory:
         return RetrievedMemory(
             record=copy.deepcopy(dict(self.record)), relevance_score=self.relevance_score
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class StoredMemoryTransition:
+    """Immutable result of one authority-only governed memory transition."""
+
+    proposal: Mapping[str, Any]
+    memory_decision: Mapping[str, Any]
+    policy_decision: Mapping[str, Any]
+    approvals: tuple[Mapping[str, Any], ...]
+    record: Mapping[str, Any]
+    evidence: Mapping[str, Any]
+    binding_digest: str
+    operation: str
+    expected_revision: int | None
+    replayed: bool = False
+
+    @property
+    def committed_record(self) -> Mapping[str, Any]:
+        return copy.deepcopy(dict(self.record))
+
+    @property
+    def canonical_evidence(self) -> Mapping[str, Any]:
+        return copy.deepcopy(dict(self.evidence))
+
+    @property
+    def previous_revision(self) -> int | None:
+        return self.expected_revision
+
+    @property
+    def revision(self) -> int:
+        return int(self.record["revision"])
+
+    def snapshot(self, *, replayed: bool | None = None) -> StoredMemoryTransition:
+        return StoredMemoryTransition(
+            proposal=copy.deepcopy(dict(self.proposal)),
+            memory_decision=copy.deepcopy(dict(self.memory_decision)),
+            policy_decision=copy.deepcopy(dict(self.policy_decision)),
+            approvals=tuple(copy.deepcopy(dict(value)) for value in self.approvals),
+            record=copy.deepcopy(dict(self.record)),
+            evidence=copy.deepcopy(dict(self.evidence)),
+            binding_digest=self.binding_digest,
+            operation=self.operation,
+            expected_revision=self.expected_revision,
+            replayed=self.replayed if replayed is None else replayed,
         )
 
 
@@ -223,6 +277,21 @@ class MemoryRetriever(Protocol):
     ) -> tuple[RetrievedMemory, ...]: ...
 
 
+class MemoryPromotionAuthority(Protocol):
+    """Authority-only boundary; it is deliberately absent from runtime/kernel ports."""
+
+    def promote_memory(
+        self,
+        *,
+        actor_context: Mapping[str, Any],
+        proposal: Mapping[str, Any],
+        memory_decision: Mapping[str, Any],
+        policy_decision: Mapping[str, Any],
+        approvals: tuple[Mapping[str, Any], ...] = (),
+        expected_revision: int | None = None,
+    ) -> StoredMemoryTransition: ...
+
+
 class _Connection(Protocol):
     def __enter__(self) -> _Connection: ...
 
@@ -259,6 +328,42 @@ def execution_binding_digest(
     )
 
 
+def memory_transition_binding_digest(
+    *,
+    actor_context: Mapping[str, Any],
+    proposal: Mapping[str, Any],
+    memory_decision: Mapping[str, Any],
+    policy_decision: Mapping[str, Any],
+    approvals: tuple[Mapping[str, Any], ...],
+    committed_record: Mapping[str, Any],
+    expected_revision: int | None,
+) -> str:
+    """Bind every authority input whose drift could change memory state."""
+
+    return sha256_digest(
+        {
+            "tenant_id": actor_context["tenant_id"],
+            "actor_id": actor_context["actor_id"],
+            "actor_context_digest": sha256_digest(actor_context),
+            "scope_digest": sha256_digest(proposal["target_scope"]),
+            "proposal_id": proposal["proposal_id"],
+            "proposal_digest": proposal["proposal_digest"],
+            "operation": proposal["change_kind"],
+            "memory_id": committed_record["memory_id"],
+            "expected_revision": expected_revision,
+            "evidence_spans": proposal["evidence_spans"],
+            "memory_decision_digest": memory_decision["decision_digest"],
+            "policy_decision_digest": policy_decision["decision_digest"],
+            "approval_digests": [value["approval_digest"] for value in approvals],
+            "retention": committed_record["retention"],
+            "effective_from": committed_record["effective_from"],
+            "effective_until": committed_record.get("effective_until"),
+            "expires_at": committed_record.get("expires_at"),
+            "committed_record_digest": committed_record["record_digest"],
+        }
+    )
+
+
 class PostgresDurableEffectStore:
     """Real PostgreSQL implementation with forced RLS and transactional authority use."""
 
@@ -270,11 +375,17 @@ class PostgresDurableEffectStore:
         clock: Callable[[], datetime],
         ids: Callable[[], str],
         lease_duration: timedelta = timedelta(seconds=30),
+        constraint_registry: ConstraintRegistry | None = None,
+        approval_verifier: DetachedProofVerifier | None = None,
+        approval_trust: Callable[[datetime], TrustContext] | None = None,
     ) -> None:
         self._runtime_connect = connect
         self._connect = privileged_connect
         self._clock = clock
         self._ids = ids
+        self._constraint_registry = constraint_registry or ConstraintRegistry({})
+        self._approval_verifier = approval_verifier
+        self._approval_trust = approval_trust
         if lease_duration <= timedelta(0):
             raise DurableStoreError("lease duration must be positive")
         self._lease_duration = lease_duration
@@ -438,6 +549,129 @@ class PostgresDurableEffectStore:
                 raise DurableStoreError("memory retrieval returned an out-of-scope record")
             matches.append(RetrievedMemory(record=record, relevance_score=score))
         return tuple(match.snapshot() for match in matches)
+
+    def _promote_memory(
+        self,
+        *,
+        actor_context: Mapping[str, Any],
+        proposal: Mapping[str, Any],
+        memory_decision: Mapping[str, Any],
+        policy_decision: Mapping[str, Any],
+        approvals: tuple[Mapping[str, Any], ...] = (),
+        expected_revision: int | None = None,
+    ) -> StoredMemoryTransition:
+        """Atomically append promotion evidence and persist its rebuildable projection."""
+
+        now = _aware_utc(self._clock())
+        actor = ActorContext(actor_context).to_dict()
+        parsed_proposal = MemoryProposal(proposal, expected_tenant=actor["tenant_id"]).to_dict()
+        parsed_decision = MemoryDecision(
+            memory_decision, expected_tenant=actor["tenant_id"]
+        ).to_dict()
+        parsed_policy = PolicyDecision(
+            policy_decision, expected_tenant=actor["tenant_id"]
+        ).to_dict()
+        parsed_approvals = tuple(
+            ApprovalRecord(value, expected_tenant=actor["tenant_id"]).to_dict()
+            for value in approvals
+        )
+        committed = _validate_memory_transition_authority(
+            actor=actor,
+            proposal=parsed_proposal,
+            memory_decision=parsed_decision,
+            policy=parsed_policy,
+            approvals=parsed_approvals,
+            expected_revision=expected_revision,
+            now=now,
+            constraint_registry=self._constraint_registry,
+            approval_verifier=self._approval_verifier,
+            approval_trust=self._approval_trust,
+        )
+        binding_digest = memory_transition_binding_digest(
+            actor_context=actor,
+            proposal=parsed_proposal,
+            memory_decision=parsed_decision,
+            policy_decision=parsed_policy,
+            approvals=parsed_approvals,
+            committed_record=committed,
+            expected_revision=expected_revision,
+        )
+        policy_ref = {
+            "record_type": "policy_decision",
+            "record_id": parsed_policy["decision_id"],
+            "record_digest": parsed_policy["decision_digest"],
+        }
+        transition_payload = {
+            "actor_id": actor["actor_id"],
+            "actor_context": actor,
+            "actor_context_digest": sha256_digest(actor),
+            "proposal": parsed_proposal,
+            "memory_decision": parsed_decision,
+            "policy_decision": parsed_policy,
+            "approvals": list(parsed_approvals),
+            "committed_record": committed,
+            "operation": parsed_proposal["change_kind"],
+            "expected_revision": expected_revision,
+            "binding_digest": binding_digest,
+            "policy_decision_digest": parsed_policy["decision_digest"],
+        }
+        with self._connect() as connection, connection.cursor() as cursor:
+            for lock_key in sorted(
+                (
+                    f"memory:{actor['tenant_id']}:{committed['memory_id']}",
+                    f"proposal:{actor['tenant_id']}:{parsed_proposal['proposal_id']}",
+                )
+            ):
+                cursor.execute(
+                    "SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(%s, 0))",
+                    (lock_key,),
+                )
+            existing = _commit_memory_transition(
+                cursor,
+                actor,
+                {
+                    "proposal_id": parsed_proposal["proposal_id"],
+                    "binding_digest": binding_digest,
+                    "transition": transition_payload,
+                },
+            )
+            if existing.get("replayed"):
+                return _stored_memory_transition(
+                    existing, expected_binding=binding_digest, replayed=True
+                )
+            evidence = self._prepare_evidence(
+                cursor=cursor,
+                actor=actor,
+                run_id=parsed_proposal["producer"]["run_id"],
+                event_kind="memory.promoted",
+                policy_ref=policy_ref,
+                payload=transition_payload,
+            )
+            stored = _commit_memory_transition(
+                cursor,
+                actor,
+                {
+                    "proposal_id": parsed_proposal["proposal_id"],
+                    "binding_digest": binding_digest,
+                    "expected_revision": expected_revision,
+                    "evidence": evidence,
+                    "transition": transition_payload,
+                },
+            )
+        return _stored_memory_transition(stored, expected_binding=binding_digest)
+
+    def _rebuild_memory_projection(
+        self, *, actor_context: Mapping[str, Any], memory_id: str
+    ) -> StoredMemoryTransition:
+        """Rebuild one memory projection exclusively from canonical ledger evidence."""
+
+        now = _aware_utc(self._clock())
+        actor = ActorContext(actor_context).to_dict()
+        if not _parse_time(actor["issued_at"]) <= now < _parse_time(actor["expires_at"]):
+            raise DurableStoreError("actor authority is not currently valid")
+        with self._connect() as connection, connection.cursor() as cursor:
+            stored = _rebuild_memory_projection(cursor, actor, {"memory_id": memory_id})
+        return _stored_memory_transition(stored)
 
     def append(
         self,
@@ -1261,6 +1495,54 @@ class PostgresDurableEffectStore:
         policy_ref: Mapping[str, str],
         payload: Mapping[str, Any],
     ) -> dict[str, Any]:
+        parsed, version = self._build_evidence(
+            cursor=cursor,
+            actor=actor,
+            run_id=run_id,
+            event_kind=event_kind,
+            policy_ref=policy_ref,
+            payload=payload,
+        )
+        changed = _runtime_write(
+            cursor,
+            actor,
+            "commit_evidence",
+            {"run_id": run_id, "expected_version": version, "envelope": parsed},
+        )
+        if changed["changed"] != 1:
+            raise OptimisticConcurrencyError("run evidence sequence lost its race")
+        return parsed
+
+    def _prepare_evidence(
+        self,
+        *,
+        cursor: Any,
+        actor: Mapping[str, Any],
+        run_id: str,
+        event_kind: str,
+        policy_ref: Mapping[str, str],
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        parsed, _version = self._build_evidence(
+            cursor=cursor,
+            actor=actor,
+            run_id=run_id,
+            event_kind=event_kind,
+            policy_ref=policy_ref,
+            payload=payload,
+        )
+        return parsed
+
+    def _build_evidence(
+        self,
+        *,
+        cursor: Any,
+        actor: Mapping[str, Any],
+        run_id: str,
+        event_kind: str,
+        policy_ref: Mapping[str, str],
+        payload: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], int]:
         head = _runtime_write(cursor, actor, "lock_run", {"run_id": run_id})
         if head is None:
             raise DurableStoreError("run scope conflicts with an existing actor")
@@ -1307,15 +1589,7 @@ class PostgresDurableEffectStore:
         }
         apply_object_digest(envelope)
         parsed = EvidenceEnvelope(envelope, expected_tenant=actor["tenant_id"]).to_dict()
-        changed = _runtime_write(
-            cursor,
-            actor,
-            "commit_evidence",
-            {"run_id": run_id, "expected_version": version, "envelope": parsed},
-        )
-        if changed["changed"] != 1:
-            raise OptimisticConcurrencyError("run evidence sequence lost its race")
-        return parsed
+        return parsed, version
 
     @staticmethod
     def _row(row: Any) -> StoredEffectExecution:
@@ -1677,6 +1951,159 @@ def _validate_outcome_evidence(
         or outcome["status"] != ("succeeded" if stored.state == "completed" else "indeterminate")
     ):
         raise DurableStoreError("durable outcome evidence binding is invalid")
+
+
+def _validate_memory_transition_authority(
+    *,
+    actor: Mapping[str, Any],
+    proposal: Mapping[str, Any],
+    memory_decision: Mapping[str, Any],
+    policy: Mapping[str, Any],
+    approvals: tuple[Mapping[str, Any], ...],
+    expected_revision: int | None,
+    now: datetime,
+    constraint_registry: ConstraintRegistry,
+    approval_verifier: DetachedProofVerifier | None,
+    approval_trust: Callable[[datetime], TrustContext] | None,
+) -> dict[str, Any]:
+    """Validate exact proposal authority and produce the committed record revision."""
+
+    validate_memory_promotion_bindings(actor, proposal, memory_decision, policy, approvals)
+    if not _parse_time(actor["issued_at"]) <= now < _parse_time(actor["expires_at"]):
+        raise DurableStoreError("actor authority is not currently valid")
+    try:
+        validate_scope_narrowing(proposal["target_scope"], actor)
+    except SemanticError as error:
+        raise DurableStoreError("proposal scope is not derived from actor authority") from error
+    scope = proposal["target_scope"]
+    if scope["selection"] != {"level": "actor"}:
+        raise DurableStoreError("memory promotion currently requires actor scope")
+    if not _parse_time(scope["derived_at"]) <= now < _parse_time(scope["valid_until"]):
+        raise DurableStoreError("proposal scope is not currently valid")
+    if proposal["lifecycle_state"] != "pending":
+        raise DurableStoreError("memory proposal is not pending")
+    if now >= _parse_time(proposal["expires_at"]):
+        raise DurableStoreError("memory proposal is expired")
+    if proposal["change_kind"] == "dispute":
+        raise DurableStoreError("memory dispute transitions are outside Phase 4.3")
+    if any("json_pointer" in span or "span_digest" in span for span in proposal["evidence_spans"]):
+        raise DurableStoreError("partial evidence spans are not implemented for promotion")
+
+    candidate = proposal["proposed_record"]
+    if candidate["provenance"] != proposal["evidence_spans"]:
+        raise DurableStoreError("proposed record provenance must exactly match proposal evidence")
+    if candidate["truth_confidence"] != proposal["truth_confidence"]:
+        raise DurableStoreError("proposed record confidence must exactly match proposal confidence")
+    if proposal["truth_confidence"]["evidence_ids"] != [
+        span["evidence_id"] for span in proposal["evidence_spans"]
+    ]:
+        raise DurableStoreError("truth confidence must bind every exact proposal evidence span")
+    if candidate["retention"]["deletion_mode"] != "retain_non_sensitive_tombstone":
+        raise DurableStoreError("physical and cryptographic memory erasure are not implemented")
+    if now >= _parse_time(candidate["retention"]["expires_at"]):
+        raise DurableStoreError("memory retention authority is expired")
+    if candidate.get("expires_at") is not None and now >= _parse_time(candidate["expires_at"]):
+        raise DurableStoreError("proposed memory is already expired")
+    if candidate.get("effective_until") is not None and now >= _parse_time(
+        candidate["effective_until"]
+    ):
+        raise DurableStoreError("proposed memory validity is already expired")
+
+    if _parse_time(policy["decided_at"]) > now:
+        raise DurableStoreError("policy decision is from the future")
+    if not _parse_time(policy["decided_at"]) <= _parse_time(memory_decision["decided_at"]) <= now:
+        raise DurableStoreError("memory decision chronology is invalid")
+    validate_constraint_support(policy, constraint_registry)
+    validate_constraint_support(memory_decision, constraint_registry)
+    if approvals and (approval_verifier is None or approval_trust is None):
+        raise DurableStoreError("approval verification is not configured")
+    seen_approvals: set[str] = set()
+    for approval in approvals:
+        if approval["approval_id"] in seen_approvals:
+            raise DurableStoreError("duplicate memory approval")
+        seen_approvals.add(approval["approval_id"])
+        if not _parse_time(approval["issued_at"]) <= now < _parse_time(approval["expires_at"]):
+            raise DurableStoreError("memory approval is not currently valid")
+        if _parse_time(approval["issued_at"]) < _parse_time(policy["decided_at"]):
+            raise DurableStoreError("memory approval predates its policy decision")
+        validate_constraint_support(approval, constraint_registry)
+        assert approval_verifier is not None and approval_trust is not None
+        verify_signed_record(
+            approval,
+            verifier=approval_verifier,
+            trust=approval_trust(now),
+            expected_tenant=actor["tenant_id"],
+        )
+
+    operation = proposal["change_kind"]
+    revision = candidate["revision"]
+    if operation == "create":
+        if expected_revision is not None or revision != 1 or "supersedes_revision" in candidate:
+            raise DurableStoreError("create requires revision one and no predecessor")
+    else:
+        if expected_revision is None or expected_revision < 1:
+            raise DurableStoreError("memory transition requires a positive expected revision")
+        if revision != expected_revision + 1:
+            raise DurableStoreError("proposed revision does not follow expected revision")
+        if candidate.get("supersedes_revision") != expected_revision:
+            raise DurableStoreError("memory transition does not bind its predecessor")
+
+    committed = copy.deepcopy(candidate)
+    committed["lifecycle_state"] = "deleted" if operation == "delete" else "active"
+    apply_object_digest(committed)
+    return MemoryRecord(committed, expected_tenant=actor["tenant_id"]).to_dict()
+
+
+def _stored_memory_transition(
+    value: Mapping[str, Any],
+    *,
+    expected_binding: str | None = None,
+    replayed: bool = False,
+) -> StoredMemoryTransition:
+    transition = value["transition"]
+    binding = transition["binding_digest"]
+    if expected_binding is not None and binding != expected_binding:
+        raise IdempotencyConflictError("memory proposal replay conflicts with original bindings")
+    evidence = EvidenceEnvelope(value["evidence"]).to_dict()
+    record = MemoryRecord(transition["committed_record"]).to_dict()
+    return StoredMemoryTransition(
+        proposal=transition["proposal"],
+        memory_decision=transition["memory_decision"],
+        policy_decision=transition["policy_decision"],
+        approvals=tuple(transition["approvals"]),
+        record=record,
+        evidence=evidence,
+        binding_digest=binding,
+        operation=transition["operation"],
+        expected_revision=transition.get("expected_revision"),
+        replayed=replayed,
+    ).snapshot()
+
+
+def _commit_memory_transition(
+    cursor: Any, actor: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    cursor.execute(
+        "SELECT gah_commit_memory_transition(%s::jsonb, %s::jsonb)",
+        (_json(actor), _json(payload)),
+    )
+    row = cursor.fetchone()
+    if row is None or not isinstance(row[0], dict):
+        raise DurableStoreError("memory transition returned a malformed result")
+    return row[0]
+
+
+def _rebuild_memory_projection(
+    cursor: Any, actor: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    cursor.execute(
+        "SELECT gah_rebuild_memory_projection(%s::jsonb, %s::jsonb)",
+        (_json(actor), _json(payload)),
+    )
+    row = cursor.fetchone()
+    if row is None or not isinstance(row[0], dict):
+        raise DurableStoreError("memory projection rebuild returned a malformed result")
+    return row[0]
 
 
 def _json(value: Any) -> str:

@@ -22,12 +22,13 @@ def postgres_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[s
         _unavailable("PostgreSQL server binaries are unavailable")
     external_socket = os.environ.get("GAH_TEST_POSTGRES_SOCKET")
     external_port = os.environ.get("GAH_TEST_POSTGRES_PORT", "5432")
+    external_database = os.environ.get("GAH_TEST_POSTGRES_DB", "postgres")
     if external_socket:
         yield {
             "host": external_socket,
             "port": external_port,
             "user": "postgres",
-            "dbname": "postgres",
+            "dbname": external_database,
         }
         return
     root = tmp_path_factory.mktemp("gah-postgres")
@@ -82,7 +83,10 @@ def postgres_connections(postgres_server: dict[str, str], tmp_path: Path):
     except ImportError:
         _unavailable("psycopg is unavailable")
         return
-    from governed_agent_harness.persistence import PostgresDurableEffectStore
+    from governed_agent_harness.persistence import (
+        PostgresDurableEffectStore,
+        PostgresMemoryPromotionAuthority,
+    )
 
     admin_values = dict(postgres_server)
     admin = psycopg.connect(**admin_values)
@@ -110,7 +114,7 @@ def postgres_connections(postgres_server: dict[str, str], tmp_path: Path):
     reset.autocommit = True
     with reset.cursor() as cursor:
         cursor.execute(
-            "TRUNCATE gah_grant_consumptions, gah_effect_executions, "
+            "TRUNCATE gah_memory_transitions, gah_grant_consumptions, gah_effect_executions, "
             "gah_request_lifecycle, gah_evidence_events, gah_run_heads, gah_memory_records"
         )
     reset.close()
@@ -125,6 +129,21 @@ def postgres_connections(postgres_server: dict[str, str], tmp_path: Path):
             privileged_connect=lambda: psycopg.connect(**writer_values),
             clock=lambda: datetime(2026, 1, 1, 0, 12, tzinfo=timezone.utc),
             ids=_ids(),
+        ),
+        "store_at": lambda now: PostgresDurableEffectStore(
+            connect=lambda: psycopg.connect(**app_values),
+            privileged_connect=lambda: psycopg.connect(**writer_values),
+            clock=lambda: now,
+            ids=_ids(),
+        ),
+        "promotion_authority_at": lambda now, verifier=None, trust=None: (
+            PostgresMemoryPromotionAuthority(
+                privileged_connect=lambda: psycopg.connect(**writer_values),
+                clock=lambda: now,
+                ids=_ids(),
+                approval_verifier=verifier,
+                approval_trust=trust,
+            )
         ),
         "store_for_lease": lambda lease_duration: PostgresDurableEffectStore(
             connect=lambda: psycopg.connect(**app_values),
