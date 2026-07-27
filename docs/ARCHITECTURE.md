@@ -37,7 +37,7 @@ flowchart LR
 
   Runtime["Bounded in-process kernel\nidentity, policy, approval, evidence"]
   Effects["Bounded governed effects\nin-process synthetic executor"]
-  Storage["Durable runtime storage"]:::planned
+  Storage["Durable PostgreSQL authority\nledger + rebuildable projections"]
   Adapters["Engine and transport adapters"]:::planned
 
   classDef planned stroke-dasharray: 5 5
@@ -53,6 +53,8 @@ flowchart LR
 | Effect broker | Implemented, bounded | One in-process path issues an exact short-lived grant, appends intent evidence, consumes authority once, invokes an injected reversible synthetic executor, and appends outcome evidence |
 | CLI, SDK, HTTP/MCP surfaces | Planned | Future application layer |
 | PostgreSQL governed lifecycle/effect authority | Implemented, bounded | Immutable checksummed migrations, canonical pre-effect evidence, rebuildable projection, least-privilege runtime functions, atomic intent/grant consumption, fenced leases, replay, restart, RLS, concurrency, and expired-lease recovery |
+| Actor-scoped memory retrieval and promotion | Implemented, bounded | Read-only runtime retrieval plus authority-only evidence-backed create/revise/supersede/tombstone |
+| Governed inert skill lifecycle | Implemented, bounded | Immutable inline JSON artifact revisions, explicit authority-only transitions, canonical evidence, rebuildable active projection, and runtime-only exact-digest resolution |
 | Sandbox, knowledge, and provider adapters | Planned | The current `none` isolation profile is not sandboxing and no provider executor ships |
 
 ### Target completed architecture
@@ -142,7 +144,7 @@ flowchart LR
   Foundation["1. Contract foundation\nschemas, validation, fixtures, packaging"]:::done
   Kernel["2. Governance kernel\nidentity, policy, approvals, lifecycle"]:::done
   Effects["3. Governed effects\ngrant, broker, synthetic executor, evidence"]:::done
-  State["4. Durable state\nledger, projections, read-only memory retrieval"]:::inprogress
+  State["4. Durable state\nledger, memory, inert skills"]:::done
   Surfaces["5. Product surfaces\nCLI, SDK, HTTP, MCP, diagnostics"]:::planned
   Operations["6. Operations + integrations\nhosted tenancy, observability, recovery,\nSkillLoop and Governed Agent Architecture adapters"]:::planned
   Release["7. Stable release\nconformance, security review, migration,\nSBOM, signed artifacts, support boundaries"]:::planned
@@ -150,7 +152,6 @@ flowchart LR
   Foundation --> Kernel --> Effects --> State --> Surfaces --> Operations --> Release
 
   classDef done stroke-width:2px
-  classDef inprogress stroke-width:2px,stroke-dasharray:5 5
   classDef planned stroke-dasharray:5 5
 ```
 
@@ -159,7 +160,7 @@ flowchart LR
 | Contract foundation | Schemas, canonicalization, semantic validation, fixtures, wheel | Implemented and covered by the contract suite |
 | Governance kernel | Trusted identity, deterministic policy, approvals, evidence-first in-memory lifecycle state | Implemented and covered by public-flow, negative-path, and adversarial kernel tests |
 | Governed effects | Exact short-lived grant, sole broker, injected executor port, intent and outcome evidence | Implemented for one reversible in-process synthetic executor plus the optional PostgreSQL Phase 4 durability slice; no provider or sandbox proof |
-| Durable state | PostgreSQL evidence ledger/projections, fenced recovery, actor-scoped read-only memory retrieval, governed promotion, durable skills | In progress: Phases 4.1 through 4.3 are shipped; skills require a separate completion decision |
+| Durable state | PostgreSQL evidence ledger/projections, fenced recovery, actor-scoped read-only memory retrieval, governed promotion, inert skill lifecycle | Implemented for the bounded local PostgreSQL Phase 4.1–4.4 scope; executable skills, distribution, and hosted operations are excluded |
 | Product surfaces | CLI, SDK, HTTP/MCP, diagnostics, run inspection | One documented workflow through every supported surface |
 | Operations and integrations | Hosted storage, tenant controls, telemetry, backup/restore, optional adapters | Cross-backend conformance and operational exercises |
 | Stable release | Compatibility policy, migrations, security review, SBOM, signed artifacts | Published release evidence and explicit support boundaries |
@@ -176,15 +177,24 @@ flowchart LR
   atomically appends
   canonical evidence and create, revise, supersede, or tombstone the
   authoritative memory record through authority-only database functions.
+- **Phase 4.4 shipped, bounded:** accepts only actor-scoped, schema-valid
+  proposals with resolvable evidence and exact gate/delivery/policy/approval
+  bindings; stores bounded inline JSON artifacts as immutable revisions; and
+  requires explicit authority-only install, activate, rollback, deactivate, and
+  rebuild operations. Runtime, evidence-writer, and lifecycle-authority
+  credentials are distinct and actor-bound. Lifecycle mutation requires a live
+  writer authorization bound to the exact canonical command and a locked
+  compare-and-swap of the transition sequence. Runtime can resolve only the
+  exact active digest.
 - **Still deferred:** automatic/model-driven promotion, embeddings, external
-  providers, project/shared retrieval, hosted operations, transports, product
-  surfaces, and provider-specific effects.
+  providers, project/shared scope, executable skill contents, archives,
+  dependencies, registries, hosted operations, transports, product surfaces,
+  and provider-specific effects.
 
-Phase 4.3 proves idempotency, conflict handling, retention/expiry, projection
-rebuild, restart, concurrent promotion, and tenant/actor isolation on real
-PostgreSQL. Phase 5 still does not start: durable skills must be implemented or
-explicitly removed from the Phase 4 completion boundary through a reviewed
-roadmap decision.
+The bounded Phase 4 gate proves lifecycle integrity, idempotency, conflict
+handling, retention/expiry, projection rebuild, restart behavior, concurrency,
+role separation, and tenant/actor isolation on local PostgreSQL. This is not
+hosted, staging, production, package-execution, or sandbox proof.
 
 ## Design invariants
 

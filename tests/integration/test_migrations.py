@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import subprocess
 import sys
@@ -11,6 +12,8 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+
+from governed_agent_harness.contracts import canonical_bytes, sha256_digest
 
 from governed_agent_harness.persistence.migration import (
     Migration,
@@ -54,6 +57,11 @@ def test_packaged_migrations_are_contiguous_and_checksum_exact() -> None:
         (3, "0003_runtime_api.sql"),
         (4, "0004_read_only_memory_retrieval.sql"),
         (5, "0005_governed_memory_promotion.sql"),
+        (6, "0006_governed_skill_lifecycle.sql"),
+        (7, "0007_skill_lifecycle_authority_role.sql"),
+        (8, "0008_fix_skill_replay_lock_key.sql"),
+        (9, "0009_fix_skill_lifecycle_predicates.sql"),
+        (10, "0010_skill_lifecycle_authority_split.sql"),
     ]
     assert migrations[0].checksum.startswith("sha256:")
     assert len(migrations[0].checksum) == 71
@@ -111,6 +119,48 @@ def test_fresh_install_registers_migration_and_is_idempotent(
     assert all(table is not None for table in tables)
 
 
+@pytest.mark.parametrize(
+    "value",
+    (
+        None,
+        True,
+        False,
+        [None, True, False, -9007199254740991, 9007199254740991],
+        {"text": 'quote=" slash=\\ control=\b\t\n'},
+        {"\U0001f600": "astral-first-in-utf16", "\ue000": "bmp-second-in-utf16"},
+    ),
+)
+def test_sql_canonical_digest_matches_python_contract(
+    migration_database: dict[str, object], value: object
+) -> None:
+    connect = migration_database["connect"]
+    assert callable(connect)
+    apply_migrations(admin_connect=connect)
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT gah_canonical_json(%s::jsonb), gah_canonical_sha256(%s::jsonb)",
+            (json.dumps(value, ensure_ascii=False), json.dumps(value, ensure_ascii=False)),
+        )
+        canonical, digest = cursor.fetchone()
+    assert canonical == canonical_bytes(value).decode("utf-8")
+    assert digest == sha256_digest(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    (1.5, 9007199254740992, -9007199254740992, "\ufffd", {"\ufffd": "forbidden"}),
+)
+def test_sql_canonical_digest_rejects_values_outside_contract_domain(
+    migration_database: dict[str, object], value: object
+) -> None:
+    connect = migration_database["connect"]
+    assert callable(connect)
+    apply_migrations(admin_connect=connect)
+    with connect() as connection, connection.cursor() as cursor:
+        with pytest.raises(Exception):
+            cursor.execute("SELECT gah_canonical_sha256(%s::jsonb)", (json.dumps(value),))
+
+
 def test_advisory_lock_serializes_concurrent_fresh_installers(
     migration_database: dict[str, object],
 ) -> None:
@@ -127,7 +177,18 @@ def test_advisory_lock_serializes_concurrent_fresh_installers(
         )
         rows = cursor.fetchall()
     assert results[0] == results[1]
-    assert rows == [(1, 1), (2, 1), (3, 1), (4, 1), (5, 1)]
+    assert rows == [
+        (1, 1),
+        (2, 1),
+        (3, 1),
+        (4, 1),
+        (5, 1),
+        (6, 1),
+        (7, 1),
+        (8, 1),
+        (9, 1),
+        (10, 1),
+    ]
 
 
 def test_exact_phase4_schema_is_registered_without_reexecution(
@@ -323,10 +384,10 @@ def test_checksum_drift_and_unknown_version_are_rejected(
             (discover_migrations()[0].checksum,),
         )
         cursor.execute(
-            "INSERT INTO gah_schema_migrations (version, checksum) VALUES (6, %s)",
+            "INSERT INTO gah_schema_migrations (version, checksum) VALUES (11, %s)",
             ("sha256:" + "1" * 64,),
         )
-    with pytest.raises(MigrationError, match="unknown migration version 0006"):
+    with pytest.raises(MigrationError, match="unknown migration version 0011"):
         apply_migrations(admin_connect=connect)
 
 
@@ -354,8 +415,8 @@ def test_failed_migration_rolls_back_registry_and_schema(
 
     packaged = discover_migrations()
     broken = Migration(
-        version=6,
-        name="0006_broken.sql",
+        version=11,
+        name="0011_broken.sql",
         checksum="sha256:" + "2" * 64,
         sql="CREATE TABLE gah_partial (id integer); SELECT definitely_not_a_function()",
     )

@@ -1,5 +1,12 @@
 # Skills
 
+> **Implemented now:** an actor-scoped PostgreSQL inert registry for bounded
+> inline JSON artifacts, immutable revisions, explicit authority-only lifecycle
+> transitions, canonical evidence, projection rebuild, and runtime-only active
+> digest resolution. **Deferred:** archives, remote registries, dependencies,
+> executable instructions/tools, sandboxes, automatic installation/activation,
+> shared/project scope, hosted operation, and SkillLoop implementation.
+
 ## Definition
 
 A skill is a versioned, integrity-addressed package that contributes agent
@@ -116,6 +123,35 @@ approval.
 If the configured environment cannot enforce a requested isolation level, the
 skill cannot activate. A process boundary without tested resource controls is
 not labeled a sandbox.
+
+## Governed inert lifecycle (Phase 4.4)
+
+The current PostgreSQL slice is an **inert registry**, not a package runner.
+It stores schema-validated inline JSON artifacts and exposes the runtime only
+the active `{skill_id, revision, artifact_digest}` triple. Artifact contents,
+install/activate/rollback/deactivate mutation, and projection rebuild are
+authority-only operations.
+
+Each authority call carries one canonical wire command containing the operation
+and its digest. The digest commits the actor, immutable source evidence,
+proposal, gate, delivery, policy, approvals, retention, validity, and any
+runtime receipt. Reusing an operation ID with a changed command fails closed.
+Artifacts have immutable revisions; lifecycle changes are separate append-only
+transitions. Activation selects an installed revision, rollback changes the
+selected active revision without rewriting artifact history, deactivation
+removes the active projection, and rebuild derives that projection from the
+immutable transition ledger rather than trusting its prior contents.
+
+The wrapper validates canonical contract records and their evidence references
+before PostgreSQL receives the command, including detached approval and receipt
+proofs. Deployment uses three mutually separated actor-bound credentials:
+runtime resolver, evidence writer, and skill-lifecycle authority. PostgreSQL
+recomputes canonical hashes and exact bindings, then requires a live
+writer-session authorization bound to the exact command and transition
+sequence. The lifecycle session applies the revision check and transition as
+one compare-and-swap under deterministic locks. Local unit proof does not prove
+the PostgreSQL/RLS state machine; live database adversarial coverage remains a
+required deployment gate.
 
 ## Trust and provenance
 

@@ -62,9 +62,18 @@ PostgreSQL gate proves that:
 - canonical evidence append and authoritative revision persistence are atomic,
   while projections remain rebuildable and never become authorization truth.
 
-Durable skills remain a separate Phase 4 deliverable. Before Phase 5 starts,
-skills must either pass their own lifecycle/integrity/restart gate or be removed
-from the Phase 4 completion boundary by an explicit reviewed roadmap change.
+The bounded inert-skill Phase 4.4 gate now additionally requires actor-only
+proposal/evidence/gate/delivery/policy/approval bindings, immutable inline JSON
+artifact revisions, authority-only install and explicit lifecycle transitions,
+mutation-free replay, optimistic concurrency, canonical evidence, rebuildable
+active projection, restart equivalence, forced RLS, separated roles, and a
+runtime-only exact active-digest resolver. Evidence-writer and lifecycle
+credentials must also remain distinct, lifecycle changes must consume a live
+exact-command writer authorization, and opposing same-revision transitions
+must resolve through one atomic compare-and-swap without deadlock or partial
+evidence. Local real-PostgreSQL proof closes this bounded Phase 4 gate only;
+executable skills, archives, dependency solving, distribution, sandboxing,
+hosted operations, and production readiness remain deferred.
 
 ## First usable release gate
 

@@ -400,17 +400,26 @@ class PostgresDurableEffectStore:
         admin_connect: Callable[[], _Connection],
         application_role: str | None = None,
         authority_role: str | None = None,
+        skill_lifecycle_authority_role: str | None = None,
     ) -> None:
         """Apply immutable migrations and grant only runtime-function membership."""
 
-        if (
-            application_role is not None
-            and authority_role is not None
-            and application_role == authority_role
+        service_roles = (
+            application_role,
+            authority_role,
+            skill_lifecycle_authority_role,
+        )
+        if len({role for role in service_roles if role is not None}) != len(
+            [role for role in service_roles if role is not None]
         ):
             raise DurableStoreError("runtime and authority database roles must be distinct")
-        reserved_roles = {"gah_schema_owner", "gah_runtime", "gah_authority_writer"}
-        for role_name in (application_role, authority_role):
+        reserved_roles = {
+            "gah_schema_owner",
+            "gah_runtime",
+            "gah_authority_writer",
+            "gah_skill_lifecycle_authority",
+        }
+        for role_name in service_roles:
             if role_name is None:
                 continue
             if not role_name or not role_name.replace("_", "a").isalnum():
@@ -424,7 +433,13 @@ class PostgresDurableEffectStore:
         from psycopg import sql
 
         with admin_connect() as connection, connection.cursor() as cursor:
-            for role_name in (application_role, authority_role):
+            # Role memberships are cluster-wide, while migrations release their
+            # lock before this connection validates and grants service roles.
+            # pg_auth_members is a shared catalog, so this transaction lock
+            # serializes every installer check-and-grant sequence across the
+            # cluster rather than only within this database.
+            cursor.execute("LOCK TABLE pg_catalog.pg_auth_members IN SHARE ROW EXCLUSIVE MODE")
+            for role_name in service_roles:
                 if role_name is None:
                     continue
                 cursor.execute(
@@ -437,38 +452,56 @@ class PostgresDurableEffectStore:
                     raise DurableStoreError("service database login does not exist")
                 if attributes != (True, False, False, False, False, False):
                     raise DurableStoreError("service database login has unsafe attributes")
-            membership_paths: list[tuple[str, str]] = []
-            if application_role is not None:
-                membership_paths.extend(
-                    (
-                        (application_role, "gah_schema_owner"),
-                        (application_role, "gah_authority_writer"),
-                    )
+            service_groups = (
+                "gah_runtime",
+                "gah_authority_writer",
+                "gah_skill_lifecycle_authority",
+                "gah_schema_owner",
+            )
+            for index, member_group in enumerate(service_groups):
+                for group in service_groups[index + 1 :]:
+                    for member, target in ((member_group, group), (group, member_group)):
+                        cursor.execute("SELECT pg_has_role(%s, %s, 'MEMBER')", (member, target))
+                        if cursor.fetchone()[0]:
+                            raise DurableStoreError(
+                                "runtime and authority roles have an unsafe membership path"
+                            )
+            for role_name, target_group in (
+                (application_role, "gah_runtime"),
+                (authority_role, "gah_authority_writer"),
+                (skill_lifecycle_authority_role, "gah_skill_lifecycle_authority"),
+            ):
+                if role_name is None:
+                    continue
+                for group in service_groups:
+                    if group == target_group:
+                        continue
+                    cursor.execute("SELECT pg_has_role(%s, %s, 'MEMBER')", (role_name, group))
+                    if cursor.fetchone()[0]:
+                        raise DurableStoreError(
+                            "runtime and authority roles have an unsafe membership path"
+                        )
+            supplied_roles = tuple(
+                role_name
+                for role_name in (
+                    application_role,
+                    authority_role,
+                    skill_lifecycle_authority_role,
                 )
-            if authority_role is not None:
-                membership_paths.extend(
-                    (
-                        (authority_role, "gah_schema_owner"),
-                        (authority_role, "gah_runtime"),
-                    )
-                )
-            if application_role is not None and authority_role is not None:
-                membership_paths.extend(
-                    (
-                        (application_role, authority_role),
-                        (authority_role, application_role),
-                        ("gah_runtime", "gah_authority_writer"),
-                    )
-                )
-            for member, group in membership_paths:
-                cursor.execute("SELECT pg_has_role(%s, %s, 'MEMBER')", (member, group))
-                if cursor.fetchone()[0]:
-                    raise DurableStoreError(
-                        "runtime and authority roles have an unsafe membership path"
-                    )
+                if role_name is not None
+            )
+            for index, member_role in enumerate(supplied_roles):
+                for group_role in supplied_roles[index + 1 :]:
+                    for member, target in ((member_role, group_role), (group_role, member_role)):
+                        cursor.execute("SELECT pg_has_role(%s, %s, 'MEMBER')", (member, target))
+                        if cursor.fetchone()[0]:
+                            raise DurableStoreError(
+                                "runtime and authority roles have an unsafe membership path"
+                            )
             for role_name, membership in (
                 (application_role, "gah_runtime"),
                 (authority_role, "gah_authority_writer"),
+                (skill_lifecycle_authority_role, "gah_skill_lifecycle_authority"),
             ):
                 if role_name is None:
                     continue
@@ -1546,6 +1579,27 @@ class PostgresDurableEffectStore:
         head = _runtime_write(cursor, actor, "lock_run", {"run_id": run_id})
         if head is None:
             raise DurableStoreError("run scope conflicts with an existing actor")
+        return self._build_evidence_from_head(
+            actor=actor,
+            run_id=run_id,
+            event_kind=event_kind,
+            policy_ref=policy_ref,
+            payload=payload,
+            head=head,
+        )
+
+    def _build_evidence_from_head(
+        self,
+        *,
+        actor: Mapping[str, Any],
+        run_id: str,
+        event_kind: str,
+        policy_ref: Mapping[str, str],
+        payload: Mapping[str, Any],
+        head: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], int]:
+        """Build a canonical envelope from a previously read authority head."""
+
         sequence = head["next_sequence"]
         prior_digest = head["last_event_digest"]
         prior_recorded_at = (

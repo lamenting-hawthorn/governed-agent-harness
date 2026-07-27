@@ -6,6 +6,15 @@ from .memory import (
     PostgresMemoryPromotionAuthority,
     StoredMemoryTransition,
 )
+from .skills import (
+    ActiveSkillDigest,
+    ActiveSkillResolver,
+    PostgresActiveSkillResolver,
+    PostgresSkillLifecycleAuthority,
+    SkillLifecycleAuthority,
+    SkillLifecycleResult,
+    SkillLifecycleState,
+)
 
 from .store import (
     DurableEffectStore,
@@ -39,5 +48,12 @@ __all__ = [
     "execution_binding_digest",
     "memory_transition_binding_digest",
     "apply_migrations",
+    "ActiveSkillDigest",
+    "ActiveSkillResolver",
+    "PostgresActiveSkillResolver",
+    "PostgresSkillLifecycleAuthority",
+    "SkillLifecycleAuthority",
+    "SkillLifecycleResult",
+    "SkillLifecycleState",
     "discover_migrations",
 ]

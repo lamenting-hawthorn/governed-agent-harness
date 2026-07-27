@@ -28,8 +28,11 @@ transport, storage product, or learning workflow.
 > deterministic ranking, revision/tombstone/temporal filtering, provenance, and
 > result limits. Phase 4.3 adds authority-only, evidence-backed create, revise,
 > same-memory supersede, and logical tombstone transitions with atomic ledger
-> evidence, optimistic concurrency, exact replay, and projection rebuild. Durable
-> skills remain Phase 4 work. `isolation_profile="none"` is not a sandbox.
+> evidence, optimistic concurrency, exact replay, and projection rebuild. Phase
+> 4.4 adds an actor-scoped inert skill registry with immutable artifact revisions,
+> explicit authority-only activation/rollback/deactivation, canonical evidence,
+> rebuildable active-digest projection, and a runtime-only exact-digest resolver.
+> It does not execute skill contents. `isolation_profile="none"` is not a sandbox.
 > Provider effects, transports, general sandboxing, and hosted
 > operations remain out of scope. This repository is not production-ready.
 
@@ -85,7 +88,7 @@ flowchart LR
 | PostgreSQL governed lifecycle/effect authority | Implemented, bounded | Checksummed migrations, canonical lifecycle evidence, rebuildable projection, runtime-role/RLS tests, atomic prepare/consume, fenced leases, replay, restart, concurrency, and expired-lease recovery |
 | Actor-scoped governed memory retrieval | Implemented, bounded | PostgreSQL-only read path; latest revisions, tombstones, temporal/category filters, provenance, limits, restart equivalence, and adversarial role/RLS proof |
 | Governed memory promotion | Implemented, bounded | Actor-only PostgreSQL authority path with exact proposal/evidence/policy/approval bindings, atomic evidence and revision persistence, replay, concurrency, tombstones, restart, rebuild, forced RLS, and runtime denial |
-| Durable skills | Phase 4 in progress | Skills remain a separate lifecycle, integrity, and restart completion decision |
+| Governed inert skill lifecycle | Implemented, bounded | Actor-only PostgreSQL install/activate/rollback/deactivate/rebuild authority; immutable inline JSON artifacts, canonical evidence, replay/concurrency, forced RLS, role separation, restart/rebuild, and runtime-only exact active-digest resolution |
 | CLI, SDK, HTTP/MCP, and hosted operations | Planned | Requires feature-level integration evidence |
 
 ## Contract foundation
@@ -147,8 +150,7 @@ wire_bytes = canonical_bytes(record)
 digest = sha256_digest(record)
 
 assert wire_bytes == (
-    b'{"record_type":"example_record","schema_version":"1.0",'
-    b'"tenant_id":"tenant.demo"}'
+    b'{"record_type":"example_record","schema_version":"1.0","tenant_id":"tenant.demo"}'
 )
 assert digest.startswith("sha256:")
 ```
@@ -260,7 +262,7 @@ flowchart LR
 | Contract foundation | Schemas, validation, fixtures, packaging | Implemented and covered by the contract suite |
 | Governance kernel | In-process identity propagation through an injected trust boundary, deterministic policy, exact approval binding, in-memory evidence-first lifecycle state | Implemented and covered by lifecycle tests |
 | Governed effects | Exact short-lived grant, sole effect broker, injected executor port, intent and outcome evidence | Implemented for one reversible in-process synthetic executor with no sandbox claim |
-| Durable state | PostgreSQL ledger/projections, fenced recovery, actor-scoped retrieval, governed promotion, then skills | In progress: Phases 4.1 through 4.3 are shipped; skills remain a separate Phase 4 decision |
+| Durable state | PostgreSQL ledger/projections, fenced recovery, actor-scoped retrieval, governed promotion, inert skill lifecycle | Implemented for the bounded Phase 4.1–4.4 local PostgreSQL boundary; hosted operations remain deferred |
 | Product surfaces | CLI, SDK, HTTP/MCP, diagnostics | Documented feature-level workflows through supported surfaces |
 | Hosted operations and integrations | Tenant controls, telemetry, backup/restore, optional adapters | Cross-backend conformance and operational exercises |
 | Stable release | Compatibility, migrations, security review, SBOM, signed artifacts | Published evidence and explicit support boundaries |
@@ -308,15 +310,22 @@ exists. In particular:
   independent review.
 
 PostgreSQL installation currently fails closed unless `current_schema()` is
-`public`. Operators must explicitly grant one login `gah_runtime`, grant a
-different login `gah_authority_writer`, and provision both logins to the same
-validated actor with `PostgresDurableEffectStore.provision_principal(...)`.
-Each database login maps to exactly one tenant/actor pair. Store construction
-requires both `connect` and `privileged_connect`; there is no fallback from the
-authority connection to the runtime connection. Migration and principal setup
-remain administrator-only operations. Installation rejects reserved, non-login,
-privileged, identical, or transitively connected service roles before granting
-either group membership.
+`public`. Operators must provision three distinct service logins for the same
+validated actor: a runtime login granted `gah_runtime`, an evidence-writer login
+granted `gah_authority_writer`, and a skill-lifecycle login granted
+`gah_skill_lifecycle_authority`. Each database login maps to exactly one
+tenant/actor pair, and no login may inherit another service role directly or
+transitively. `PostgresDurableEffectStore` requires separate `connect` and
+`privileged_connect` factories. `PostgresSkillLifecycleAuthority` additionally
+requires a lifecycle `privileged_connect` and a distinct
+`evidence_writer_connect`; neither connection falls back to the runtime
+connection. The Python admission boundary validates detached approval and
+receipt proofs. PostgreSQL independently verifies canonical hashes and exact
+bindings, then requires live authorization from the evidence-writer session
+before the separated lifecycle session may mutate state. Migration and
+principal setup remain administrator-only operations. Installation rejects
+reserved, non-login, privileged, identical, or transitively connected service
+roles before granting group membership.
 
 Read the [security model](docs/SECURITY_MODEL.md),
 [threat model](docs/THREAT_MODEL.md), and [security reporting policy](SECURITY.md)
