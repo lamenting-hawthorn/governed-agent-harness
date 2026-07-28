@@ -15,6 +15,20 @@ from .skills import (
     SkillLifecycleResult,
     SkillLifecycleState,
 )
+from .execution import (
+    BUILTIN_ECHO_ARTIFACT,
+    BUILTIN_ECHO_ARTIFACT_DIGEST,
+    BUILTIN_ECHO_TOOL_ID,
+    BUILTIN_ECHO_TOOL_VERSION,
+    BuiltinExecution,
+    BuiltinHandlerRegistry,
+    ExecutionAdmissionError,
+    ExecutionAuthorization,
+    PostgresBuiltinExecutionRuntime,
+    PostgresExecutionAdmissionAuthority,
+    build_execution_admission_command,
+    execution_operation_digest,
+)
 
 from .store import (
     DurableEffectStore,
@@ -56,4 +70,16 @@ __all__ = [
     "SkillLifecycleResult",
     "SkillLifecycleState",
     "discover_migrations",
+    "BUILTIN_ECHO_ARTIFACT",
+    "BUILTIN_ECHO_ARTIFACT_DIGEST",
+    "BUILTIN_ECHO_TOOL_ID",
+    "BUILTIN_ECHO_TOOL_VERSION",
+    "BuiltinExecution",
+    "BuiltinHandlerRegistry",
+    "ExecutionAdmissionError",
+    "ExecutionAuthorization",
+    "PostgresBuiltinExecutionRuntime",
+    "PostgresExecutionAdmissionAuthority",
+    "build_execution_admission_command",
+    "execution_operation_digest",
 ]

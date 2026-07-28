@@ -75,6 +75,17 @@ evidence. Local real-PostgreSQL proof closes this bounded Phase 4 gate only;
 executable skills, archives, dependency solving, distribution, sandboxing,
 hosted operations, and production readiness remain deferred.
 
+The bounded Phase 5.1 gate additionally requires exact active-digest resolution,
+schema-valid request and authority binding, single-use expiry, a static
+preinstalled no-I/O handler, intent-before-invocation evidence, canonical
+terminal outcome evidence, mutation-free replay/rejection, one-winner
+concurrency, expired-lease recovery without retry, ledger-derived projection
+rebuild that rejects poisoned execution events, distinct live-commitment
+admission/evidence-writer credentials, forced RLS, fixed `SECURITY DEFINER`
+search paths, and zero direct runtime table DML. It does not approve arbitrary
+skill execution, sandboxing, transports, providers, hosted operation, staging,
+or production.
+
 ## First usable release gate
 
 The initial release is done when a new contributor can, from a clean supported

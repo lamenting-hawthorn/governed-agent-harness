@@ -32,7 +32,10 @@ transport, storage product, or learning workflow.
 > 4.4 adds an actor-scoped inert skill registry with immutable artifact revisions,
 > explicit authority-only activation/rollback/deactivation, canonical evidence,
 > rebuildable active-digest projection, and a runtime-only exact-digest resolver.
-> It does not execute skill contents. `isolation_profile="none"` is not a sandbox.
+> Phase 5.1 composes that resolver with one authority-issued, single-use,
+> expiring authorization and exactly one preinstalled deterministic echo
+> handler selected by a static host registry. Stored artifact text is never
+> interpreted or executed. `isolation_profile="none"` is not a sandbox.
 > Provider effects, transports, general sandboxing, and hosted
 > operations remain out of scope. This repository is not production-ready.
 
@@ -89,6 +92,7 @@ flowchart LR
 | Actor-scoped governed memory retrieval | Implemented, bounded | PostgreSQL-only read path; latest revisions, tombstones, temporal/category filters, provenance, limits, restart equivalence, and adversarial role/RLS proof |
 | Governed memory promotion | Implemented, bounded | Actor-only PostgreSQL authority path with exact proposal/evidence/policy/approval bindings, atomic evidence and revision persistence, replay, concurrency, tombstones, restart, rebuild, forced RLS, and runtime denial |
 | Governed inert skill lifecycle | Implemented, bounded | Actor-only PostgreSQL install/activate/rollback/deactivate/rebuild authority; immutable inline JSON artifacts, canonical evidence, replay/concurrency, forced RLS, role separation, restart/rebuild, and runtime-only exact active-digest resolution |
+| Built-in execution admission | Implemented, narrowly bounded | Exact active digest plus request/policy/gate/approval/evidence/validity/retention binding; authority-only five-minute grant issuance; runtime-only single-use consume; one static deterministic echo handler; canonical intent/outcome evidence; replay, fencing, recovery, and rebuild |
 | CLI, SDK, HTTP/MCP, and hosted operations | Planned | Requires feature-level integration evidence |
 
 ## Contract foundation
@@ -134,6 +138,27 @@ The self-check validates the complete model registry, deterministic fixtures,
 cross-record bindings, proof trust, historical acceptance, and canonicalization
 vectors. Tests require no production credentials, external services, or private
 infrastructure.
+
+### PostgreSQL execution-admission prerequisite
+
+The optional Phase 5.1 PostgreSQL path additionally requires the locally built
+`gah_ed25519` PGXS extension and a compatible `libsodium` runtime (>= 1.0.20,
+< 2.0). The extension verifies detached Ed25519 proofs only; it has no private
+keys. PyNaCl 1.6.2 is a test/signing dependency, not a database signer. The
+Python wheel does not install PostgreSQL extensions: install `native/gah_ed25519`
+with the target server's `pg_config` before applying the migration. Missing or
+wrong extension/runtime identity fails closed. The installation and migration
+must use the same database administrator: migration verifies the extension's
+fixed `gah_crypto` schema, extension membership, native C module/symbol, and
+catalog safety flags before transferring the callable function to the schema
+owner and closing every non-owner ACL.
+
+This phase does not provide key enrollment, rotation, or post-compromise
+revocation APIs. `gah_execution_proof_keys` is an administrator-provisioned,
+append-only prerequisite; its `revoked_at` field records imported key status,
+not a mutable incident-response control. The finite validity windows and fresh
+key IDs used by local tests are test fixtures only. Do not claim production key
+compromise response or readiness from this implementation.
 
 ### Canonicalization example
 
@@ -262,7 +287,7 @@ flowchart LR
 | Contract foundation | Schemas, validation, fixtures, packaging | Implemented and covered by the contract suite |
 | Governance kernel | In-process identity propagation through an injected trust boundary, deterministic policy, exact approval binding, in-memory evidence-first lifecycle state | Implemented and covered by lifecycle tests |
 | Governed effects | Exact short-lived grant, sole effect broker, injected executor port, intent and outcome evidence | Implemented for one reversible in-process synthetic executor with no sandbox claim |
-| Durable state | PostgreSQL ledger/projections, fenced recovery, actor-scoped retrieval, governed promotion, inert skill lifecycle | Implemented for the bounded Phase 4.1–4.4 local PostgreSQL boundary; hosted operations remain deferred |
+| Durable state | PostgreSQL ledger/projections, fenced recovery, actor-scoped retrieval, governed promotion, inert skill lifecycle, bounded built-in execution admission | Implemented for the bounded Phase 4.1–5.1 local PostgreSQL boundary; arbitrary skill execution and hosted operations remain deferred |
 | Product surfaces | CLI, SDK, HTTP/MCP, diagnostics | Documented feature-level workflows through supported surfaces |
 | Hosted operations and integrations | Tenant controls, telemetry, backup/restore, optional adapters | Cross-backend conformance and operational exercises |
 | Stable release | Compatibility, migrations, security review, SBOM, signed artifacts | Published evidence and explicit support boundaries |
@@ -310,22 +335,23 @@ exists. In particular:
   independent review.
 
 PostgreSQL installation currently fails closed unless `current_schema()` is
-`public`. Operators must provision three distinct service logins for the same
+`public`. Operators must provision four distinct service logins for the same
 validated actor: a runtime login granted `gah_runtime`, an evidence-writer login
 granted `gah_authority_writer`, and a skill-lifecycle login granted
-`gah_skill_lifecycle_authority`. Each database login maps to exactly one
+`gah_skill_lifecycle_authority`, plus an execution-admission login granted
+`gah_execution_admission_authority`. Each database login maps to exactly one
 tenant/actor pair, and no login may inherit another service role directly or
 transitively. `PostgresDurableEffectStore` requires separate `connect` and
-`privileged_connect` factories. `PostgresSkillLifecycleAuthority` additionally
-requires a lifecycle `privileged_connect` and a distinct
-`evidence_writer_connect`; neither connection falls back to the runtime
-connection. The Python admission boundary validates detached approval and
-receipt proofs. PostgreSQL independently verifies canonical hashes and exact
-bindings, then requires live authorization from the evidence-writer session
-before the separated lifecycle session may mutate state. Migration and
-principal setup remain administrator-only operations. Installation rejects
-reserved, non-login, privileged, identical, or transitively connected service
-roles before granting group membership.
+`privileged_connect` factories. The skill-lifecycle and execution-admission
+ports each require their own authority connection and a distinct
+`evidence_writer_connect`; no authority connection falls back to the runtime
+connection. The Python boundaries validate detached approval, receipt, and
+grant proofs. PostgreSQL independently verifies canonical hashes and exact
+bindings, then requires a live digest-bound authorization from the separate
+evidence-writer session before lifecycle mutation or execution issuance.
+Migration and principal setup remain administrator-only operations.
+Installation rejects reserved, non-login, privileged, identical, or
+transitively connected service roles before granting group membership.
 
 Read the [security model](docs/SECURITY_MODEL.md),
 [threat model](docs/THREAT_MODEL.md), and [security reporting policy](SECURITY.md)

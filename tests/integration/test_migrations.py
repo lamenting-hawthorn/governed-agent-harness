@@ -62,6 +62,7 @@ def test_packaged_migrations_are_contiguous_and_checksum_exact() -> None:
         (8, "0008_fix_skill_replay_lock_key.sql"),
         (9, "0009_fix_skill_lifecycle_predicates.sql"),
         (10, "0010_skill_lifecycle_authority_split.sql"),
+        (11, "0011_builtin_execution_admission.sql"),
     ]
     assert migrations[0].checksum.startswith("sha256:")
     assert len(migrations[0].checksum) == 71
@@ -117,6 +118,100 @@ def test_fresh_install_registers_migration_and_is_idempotent(
     assert rows == [(item.version, item.checksum, True) for item in first]
     assert second == first
     assert all(table is not None for table in tables)
+
+
+def test_phase44_registered_schema_upgrades_once_to_execution_admission(
+    migration_database: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import governed_agent_harness.persistence.migration as migration_module
+
+    connect = migration_database["connect"]
+    assert callable(connect)
+    packaged = discover_migrations()
+    phase44 = packaged[:-1]
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase44)
+    assert apply_migrations(admin_connect=connect) == phase44
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
+
+    first_upgrade = apply_migrations(admin_connect=connect)
+    second_upgrade = apply_migrations(admin_connect=connect)
+
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT version, checksum FROM gah_schema_migrations ORDER BY version")
+        migrations = cursor.fetchall()
+        cursor.execute(
+            "SELECT to_regclass('gah_builtin_execution_state'), "
+            "to_regprocedure("
+            "'gah_issue_builtin_execution_authorization(jsonb,jsonb,jsonb,jsonb,jsonb)'"
+            ") IS NOT NULL"
+        )
+        installed = cursor.fetchone()
+    assert first_upgrade == second_upgrade == packaged
+    assert migrations == [(item.version, item.checksum) for item in packaged]
+    assert installed == ("gah_builtin_execution_state", True)
+
+
+@pytest.mark.parametrize(
+    ("replacement", "match"),
+    (
+        (
+            ("gah_ed25519", "gah_ed25519_missing_test_artifact"),
+            "gah_ed25519_missing_test_artifact",
+        ),
+        (
+            ("extension_row.extversion <> '1.0'", "extension_row.extversion <> '9.9'"),
+            "gah_ed25519 extension identity is unavailable or unsafe",
+        ),
+    ),
+)
+def test_execution_native_extension_identity_gate_rolls_back_on_missing_or_wrong_artifact(
+    migration_database: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: tuple[str, str],
+    match: str,
+) -> None:
+    """Harness-only SQL variants prove the native identity gate is transactional.
+
+    No installed extension files or PostgreSQL catalogs are changed: this test
+    substitutes only the in-memory migration payload before `apply_migrations`.
+    """
+
+    import governed_agent_harness.persistence.migration as migration_module
+
+    connect = migration_database["connect"]
+    assert callable(connect)
+    packaged = discover_migrations()
+    phase44 = packaged[:-1]
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase44)
+    assert apply_migrations(admin_connect=connect) == phase44
+
+    candidate = packaged[-1]
+    original, changed = replacement
+    modified_sql = candidate.sql.replace(original, changed)
+    assert modified_sql != candidate.sql
+    modified = Migration(
+        version=candidate.version,
+        name=candidate.name,
+        checksum=candidate.checksum,
+        sql=modified_sql,
+    )
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: (*phase44, modified))
+
+    with pytest.raises(Exception, match=match):
+        apply_migrations(admin_connect=connect)
+
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT version FROM gah_schema_migrations ORDER BY version")
+        applied_versions = cursor.fetchall()
+        cursor.execute(
+            "SELECT to_regclass('gah_builtin_execution_state'), "
+            "to_regprocedure('gah_rebuild_builtin_execution(jsonb,jsonb)'), "
+            "to_regnamespace('gah_crypto')"
+        )
+        leftovers = cursor.fetchone()
+    assert applied_versions == [(item.version,) for item in phase44]
+    assert leftovers == (None, None, None)
 
 
 @pytest.mark.parametrize(
@@ -188,6 +283,7 @@ def test_advisory_lock_serializes_concurrent_fresh_installers(
         (8, 1),
         (9, 1),
         (10, 1),
+        (11, 1),
     ]
 
 
@@ -384,10 +480,10 @@ def test_checksum_drift_and_unknown_version_are_rejected(
             (discover_migrations()[0].checksum,),
         )
         cursor.execute(
-            "INSERT INTO gah_schema_migrations (version, checksum) VALUES (11, %s)",
+            "INSERT INTO gah_schema_migrations (version, checksum) VALUES (12, %s)",
             ("sha256:" + "1" * 64,),
         )
-    with pytest.raises(MigrationError, match="unknown migration version 0011"):
+    with pytest.raises(MigrationError, match="unknown migration version 0012"):
         apply_migrations(admin_connect=connect)
 
 
@@ -415,8 +511,8 @@ def test_failed_migration_rolls_back_registry_and_schema(
 
     packaged = discover_migrations()
     broken = Migration(
-        version=11,
-        name="0011_broken.sql",
+        version=12,
+        name="0012_broken.sql",
         checksum="sha256:" + "2" * 64,
         sql="CREATE TABLE gah_partial (id integer); SELECT definitely_not_a_function()",
     )

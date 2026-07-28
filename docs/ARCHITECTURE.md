@@ -55,6 +55,7 @@ flowchart LR
 | PostgreSQL governed lifecycle/effect authority | Implemented, bounded | Immutable checksummed migrations, canonical pre-effect evidence, rebuildable projection, least-privilege runtime functions, atomic intent/grant consumption, fenced leases, replay, restart, RLS, concurrency, and expired-lease recovery |
 | Actor-scoped memory retrieval and promotion | Implemented, bounded | Read-only runtime retrieval plus authority-only evidence-backed create/revise/supersede/tombstone |
 | Governed inert skill lifecycle | Implemented, bounded | Immutable inline JSON artifact revisions, explicit authority-only transitions, canonical evidence, rebuildable active projection, and runtime-only exact-digest resolution |
+| Built-in execution admission | Implemented, narrowly bounded | Authority-issued single-use grant over one exact active digest and one static deterministic no-I/O handler; canonical intent/outcome evidence, replay, fencing, recovery, and rebuild |
 | Sandbox, knowledge, and provider adapters | Planned | The current `none` isolation profile is not sandboxing and no provider executor ships |
 
 ### Target completed architecture
@@ -160,7 +161,7 @@ flowchart LR
 | Contract foundation | Schemas, canonicalization, semantic validation, fixtures, wheel | Implemented and covered by the contract suite |
 | Governance kernel | Trusted identity, deterministic policy, approvals, evidence-first in-memory lifecycle state | Implemented and covered by public-flow, negative-path, and adversarial kernel tests |
 | Governed effects | Exact short-lived grant, sole broker, injected executor port, intent and outcome evidence | Implemented for one reversible in-process synthetic executor plus the optional PostgreSQL Phase 4 durability slice; no provider or sandbox proof |
-| Durable state | PostgreSQL evidence ledger/projections, fenced recovery, actor-scoped read-only memory retrieval, governed promotion, inert skill lifecycle | Implemented for the bounded local PostgreSQL Phase 4.1–4.4 scope; executable skills, distribution, and hosted operations are excluded |
+| Durable state | PostgreSQL evidence ledger/projections, fenced recovery, actor-scoped read-only memory retrieval, governed promotion, inert skill lifecycle, bounded built-in execution admission | Implemented for the bounded local PostgreSQL Phase 4.1–5.1 scope; arbitrary executable skills, distribution, and hosted operations are excluded |
 | Product surfaces | CLI, SDK, HTTP/MCP, diagnostics, run inspection | One documented workflow through every supported surface |
 | Operations and integrations | Hosted storage, tenant controls, telemetry, backup/restore, optional adapters | Cross-backend conformance and operational exercises |
 | Stable release | Compatibility policy, migrations, security review, SBOM, signed artifacts | Published release evidence and explicit support boundaries |
@@ -186,15 +187,23 @@ flowchart LR
   writer authorization bound to the exact canonical command and a locked
   compare-and-swap of the transition sequence. Runtime can resolve only the
   exact active digest.
+- **Phase 5.1 implemented, narrowly bounded:** composes that exact digest with
+  one signed, single-use, retention-capped grant and one preinstalled
+  deterministic echo handler. Issuance requires distinct admission and
+  evidence-writer credentials with a live lock commitment over the exact
+  actor, operation, command, grant, and request. Execution event kinds are
+  reserved from the generic writer; replay, recovery, and ledger-derived
+  rebuild never interpret stored artifact JSON.
 - **Still deferred:** automatic/model-driven promotion, embeddings, external
-  providers, project/shared scope, executable skill contents, archives,
-  dependencies, registries, hosted operations, transports, product surfaces,
-  and provider-specific effects.
+  providers, project/shared scope, arbitrary or stored executable skill
+  contents, archives, dependencies, registries, hosted operations, transports,
+  product surfaces, and provider-specific effects.
 
-The bounded Phase 4 gate proves lifecycle integrity, idempotency, conflict
-handling, retention/expiry, projection rebuild, restart behavior, concurrency,
-role separation, and tenant/actor isolation on local PostgreSQL. This is not
-hosted, staging, production, package-execution, or sandbox proof.
+The bounded Phase 4–5.1 gates prove lifecycle and execution-admission integrity,
+idempotency, conflict handling, retention/expiry, projection rebuild, restart
+behavior, concurrency, role separation, and tenant/actor isolation on local
+PostgreSQL. This is not hosted, staging, production, arbitrary package-execution,
+or sandbox proof.
 
 ## Design invariants
 

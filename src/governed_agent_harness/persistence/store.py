@@ -401,6 +401,7 @@ class PostgresDurableEffectStore:
         application_role: str | None = None,
         authority_role: str | None = None,
         skill_lifecycle_authority_role: str | None = None,
+        execution_admission_authority_role: str | None = None,
     ) -> None:
         """Apply immutable migrations and grant only runtime-function membership."""
 
@@ -408,6 +409,7 @@ class PostgresDurableEffectStore:
             application_role,
             authority_role,
             skill_lifecycle_authority_role,
+            execution_admission_authority_role,
         )
         if len({role for role in service_roles if role is not None}) != len(
             [role for role in service_roles if role is not None]
@@ -418,6 +420,7 @@ class PostgresDurableEffectStore:
             "gah_runtime",
             "gah_authority_writer",
             "gah_skill_lifecycle_authority",
+            "gah_execution_admission_authority",
         }
         for role_name in service_roles:
             if role_name is None:
@@ -456,6 +459,7 @@ class PostgresDurableEffectStore:
                 "gah_runtime",
                 "gah_authority_writer",
                 "gah_skill_lifecycle_authority",
+                "gah_execution_admission_authority",
                 "gah_schema_owner",
             )
             for index, member_group in enumerate(service_groups):
@@ -470,6 +474,10 @@ class PostgresDurableEffectStore:
                 (application_role, "gah_runtime"),
                 (authority_role, "gah_authority_writer"),
                 (skill_lifecycle_authority_role, "gah_skill_lifecycle_authority"),
+                (
+                    execution_admission_authority_role,
+                    "gah_execution_admission_authority",
+                ),
             ):
                 if role_name is None:
                     continue
@@ -487,6 +495,7 @@ class PostgresDurableEffectStore:
                     application_role,
                     authority_role,
                     skill_lifecycle_authority_role,
+                    execution_admission_authority_role,
                 )
                 if role_name is not None
             )
@@ -502,6 +511,10 @@ class PostgresDurableEffectStore:
                 (application_role, "gah_runtime"),
                 (authority_role, "gah_authority_writer"),
                 (skill_lifecycle_authority_role, "gah_skill_lifecycle_authority"),
+                (
+                    execution_admission_authority_role,
+                    "gah_execution_admission_authority",
+                ),
             ):
                 if role_name is None:
                     continue

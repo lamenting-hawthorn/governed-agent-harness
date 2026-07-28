@@ -3,7 +3,8 @@
 > **Implemented now:** an actor-scoped PostgreSQL inert registry for bounded
 > inline JSON artifacts, immutable revisions, explicit authority-only lifecycle
 > transitions, canonical evidence, projection rebuild, and runtime-only active
-> digest resolution. **Deferred:** archives, remote registries, dependencies,
+> digest resolution. Phase 5.1 additionally admits one preinstalled
+> deterministic echo handler by exact digest. **Deferred:** archives, remote registries, dependencies,
 > executable instructions/tools, sandboxes, automatic installation/activation,
 > shared/project scope, hosted operation, and SkillLoop implementation.
 
@@ -152,6 +153,30 @@ sequence. The lifecycle session applies the revision check and transition as
 one compare-and-swap under deterministic locks. Local unit proof does not prove
 the PostgreSQL/RLS state machine; live database adversarial coverage remains a
 required deployment gate.
+
+## Bounded built-in execution admission (Phase 5.1)
+
+The runtime may invoke only `gah.builtin.echo@1.0.0`, selected from a static host
+registry by the exact active artifact digest. The handler is pure, deterministic,
+and preinstalled; it has no network, filesystem, provider, secret, package, or
+stored-artifact execution path.
+
+An authority-only port binds one schema-valid `ToolRequest` to the resolved
+actor-scoped revision/digest and the exact lifecycle gate, source evidence,
+validity, retention, execution policy, and separation-of-duties approval. It
+issues an exact signed `AuthorizationGrant` lasting at most five minutes and
+never beyond validity or retention. Issuance requires distinct admission and
+evidence-writer credentials to hold a live PostgreSQL lock commitment over the
+exact actor, operation, command, grant, and request digests. PostgreSQL
+recomputes canonical digests, verifies the active lifecycle binding, reserves
+the three execution event kinds from the generic evidence writer, and permits
+the runtime role to consume that grant only through narrow built-in entry
+points. Replays do not invoke the handler, changed bindings conflict, concurrent
+consume has one winner, poisoned canonical evidence cannot rebuild authority,
+and an expired execution lease recovers only to `indeterminate` without retry.
+
+This slice is not a package runner, general executor, transport, provider
+integration, or sandbox.
 
 ## Trust and provenance
 

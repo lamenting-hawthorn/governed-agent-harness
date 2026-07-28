@@ -113,20 +113,39 @@ generation may continue only if doing so cannot cause the protected effect.
 
 ## PostgreSQL authority boundary
 
-The optional Phase 4 store separates `NOLOGIN` schema-owner, runtime-reader,
-and authority-writer roles. Both service roles are `NOSUPERUSER NOBYPASSRLS`.
-The runtime reader cannot modify tables, the migration registry, lifecycle
-state, ownership, grants, policies, or functions. A distinct authority login
-receives only operation-specific, fixed-search-path `SECURITY DEFINER`
-transition entry points; `PUBLIC` and runtime-reader execution are revoked.
-Database scope is
+The optional PostgreSQL store separates `NOLOGIN` schema-owner, runtime,
+evidence-writer, skill-lifecycle-authority, and execution-admission-authority
+roles. Every service login is `NOSUPERUSER NOBYPASSRLS`, maps to exactly one
+group role, and cannot inherit another service role. The runtime cannot modify
+tables, the migration registry, lifecycle state, ownership, grants, policies,
+or functions directly. Distinct authority logins receive only
+operation-specific, fixed-search-path `SECURITY DEFINER` entry points; `PUBLIC`
+and unrelated service-role execution are revoked. Database scope is
 populated from the exact schema-validated `ActorContext` passed by the kernel,
 and every stored request must bind its digest. This protects against direct SQL
 bypass by the restricted role; possession or compromise of the trusted runtime
-reader credential cannot become write authority. Compromise of the distinct
-authority credential remains a deployment incident, not a substitute for user
-authentication. Each login is explicitly provisioned to exactly one actor;
-installation currently supports only the locked-down `public` schema.
+credential cannot become write authority. Skill lifecycle mutation and
+execution authorization each require a live evidence-writer session holding
+advisory locks committed to their exact canonical bindings; the execution
+commitment includes actor, operation, command, grant, and request digests.
+Compromise of multiple distinct authority credentials remains a deployment
+incident, not a substitute for user authentication. Each login is explicitly
+provisioned to exactly one actor; installation currently supports only the
+locked-down `public` schema.
+
+The bounded execution-admission path also depends on the operator-installed
+`gah_ed25519` PGXS extension and a `libsodium` runtime >= 1.0.20 and < 2.0.
+It provides verification only and stores no database private key; PyNaCl 1.6.2
+is used by deterministic test/signing fixtures, not by PostgreSQL signing. The
+Python wheel does not install native PostgreSQL extensions. A missing, wrong, or
+incompatible extension/runtime is an admission failure, not a fallback path.
+
+Phase 5.1 does not implement proof-key enrollment, rotation, or
+post-compromise revocation. `gah_execution_proof_keys` is an
+administrator-provisioned append-only prerequisite; `revoked_at` preserves an
+imported status rather than acting as a mutable incident-response mechanism.
+Finite validity windows and fresh key IDs in local tests do not demonstrate
+production key-compromise response or readiness.
 
 The ledger is authoritative. Lifecycle projection rows carry a version and
 last evidence position and are rejected if replay differs. Execution owners
