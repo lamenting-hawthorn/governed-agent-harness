@@ -30,7 +30,7 @@ jobs:
       - name: Install PostgreSQL and native verification prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential curl minisign pkg-config postgresql postgresql-server-dev-all
+          sudo apt-get install -y build-essential curl minisign pkg-config postgresql-17 postgresql-server-dev-17
           PG_BIN="$(dirname "$(find /usr/lib/postgresql -type f -name pg_ctl | sort | tail -1)")"
           PG_CONFIG="$(find /usr/lib/postgresql -type f -name pg_config | sort | tail -1)"
           test "$("$PG_CONFIG" --bindir)" = "$PG_BIN"
