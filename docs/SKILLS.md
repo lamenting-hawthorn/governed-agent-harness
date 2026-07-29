@@ -149,10 +149,12 @@ proofs. Deployment uses three mutually separated actor-bound credentials:
 runtime resolver, evidence writer, and skill-lifecycle authority. PostgreSQL
 recomputes canonical hashes and exact bindings, then requires a live
 writer-session authorization bound to the exact command and transition
-sequence. The lifecycle session applies the revision check and transition as
-one compare-and-swap under deterministic locks. Local unit proof does not prove
-the PostgreSQL/RLS state machine; live database adversarial coverage remains a
-required deployment gate.
+sequence. Durable artifact and transition rows repeat the actor-only tenant,
+scope, delivery, artifact identity, inert-key, and 64 KiB canonical-size
+bindings as database constraints. The lifecycle session applies the revision
+check and transition as one compare-and-swap under deterministic locks. Local
+unit proof does not prove the PostgreSQL/RLS state machine; live database
+adversarial coverage remains a required deployment gate.
 
 ## Bounded built-in execution admission (Phase 5.1)
 
@@ -174,6 +176,8 @@ the runtime role to consume that grant only through narrow built-in entry
 points. Replays do not invoke the handler, changed bindings conflict, concurrent
 consume has one winner, poisoned canonical evidence cannot rebuild authority,
 and an expired execution lease recovers only to `indeterminate` without retry.
+Execution-state RLS binds the exact actor context and session, and the database
+rejects any initial or renewed lease that reaches or outlives grant expiry.
 
 This slice is not a package runner, general executor, transport, provider
 integration, or sandbox.

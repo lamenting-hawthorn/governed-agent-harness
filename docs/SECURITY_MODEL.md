@@ -151,6 +151,9 @@ The ledger is authoritative. Lifecycle projection rows carry a version and
 last evidence position and are rejected if replay differs. Execution owners
 carry an attempt ID, generation, lease expiry, and renewal time. A stale owner
 cannot append terminal evidence after expiry or recovery wins the atomic fence.
+Execution-state RLS also binds the exact actor-context digest and session.
+Initial and renewed leases must end strictly before the signed grant expires;
+the grant is already capped by the actor, validity, and retention windows.
 Lease expiry records ambiguity as `indeterminate`; it never authorizes retry.
 
 The same runtime role has no direct access to governed-memory rows. Its only

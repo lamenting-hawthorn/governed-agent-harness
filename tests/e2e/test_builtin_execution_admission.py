@@ -237,14 +237,20 @@ def _receipt_trust(now: datetime) -> TrustContext:
     )
 
 
-def _persisted_skill(postgres_connections, *, retention_expires_at: str | None = None):
+def _persisted_skill(
+    postgres_connections,
+    *,
+    retention_expires_at: str | None = None,
+    actor_expires_at: str = "2030-01-01T00:00:00.000Z",
+):
     actor, command = build_skill_command()
     if retention_expires_at is not None:
         command["retention"]["expires_at"] = retention_expires_at
     actor["issued_at"] = "2026-01-01T00:00:00.000Z"
-    actor["expires_at"] = "2030-01-01T00:00:00.000Z"
+    actor["expires_at"] = actor_expires_at
     target_scope = command["skill_proposal"]["target_scope"]
     target_scope["parent_digest"] = sha256_digest(actor)
+    target_scope["valid_until"] = actor["expires_at"]
     command["gate_decision"]["target_scope"] = copy.deepcopy(target_scope)
     command["delivery_envelope"]["target_scope"] = copy.deepcopy(target_scope)
     source = postgres_connections["store_at"](NOW).append(
@@ -898,6 +904,46 @@ def test_runtime_terminal_replay_rejects_changed_actor_context_without_mutation(
     assert _snapshot(postgres_connections) == before
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        lambda actor: actor.__setitem__("session_id", "018f0000-0000-7000-8000-00000000fff1"),
+        lambda actor: actor.__setitem__("correlation_id", "018f0000-0000-7000-8000-00000000fff2"),
+    ),
+)
+def test_rebuild_existing_state_rejects_changed_session_or_actor_context_without_mutation(
+    postgres_connections,
+    mutation,
+):
+    actor, skill = _persisted_skill(postgres_connections)
+    authorization = _authority(postgres_connections).issue(
+        actor_context=actor,
+        command=_execution_command(actor, skill, operation_id="phase5-rebuild-actor-binding"),
+    )
+    changed_actor = copy.deepcopy(actor)
+    mutation(changed_actor)
+    before = _snapshot(postgres_connections)
+    with (
+        postgres_connections["execution_authority"]() as connection,
+        connection.cursor() as cursor,
+    ):
+        with pytest.raises(Exception):
+            cursor.execute(
+                "SELECT gah_rebuild_builtin_execution(%s::jsonb,%s::jsonb)",
+                (
+                    json.dumps(changed_actor),
+                    json.dumps(
+                        {
+                            "operation_id": authorization.command["operation_id"],
+                            "operation_digest": authorization.command["operation_digest"],
+                        }
+                    ),
+                ),
+            )
+        connection.rollback()
+    assert _snapshot(postgres_connections) == before
+
+
 def test_runtime_recovery_rejects_changed_actor_context_without_mutation(
     postgres_connections,
 ):
@@ -1010,7 +1056,7 @@ def test_replay_rejects_changed_actor_grant_or_snapshot_without_mutation(postgre
     before = _snapshot(postgres_connections)
     changed_actor = copy.deepcopy(actor)
     changed_actor["correlation_id"] = "018f0000-0000-7000-8000-00000000fffe"
-    with pytest.raises(Exception, match="conflicts"):
+    with pytest.raises(Exception, match="outside the resolved actor binding"):
         _authority(postgres_connections).issue(actor_context=changed_actor, command=command)
     changed_grant = copy.deepcopy(dict(authorization.grant))
     _tamper_proof_field(changed_grant["proof"], "detached_proof")
@@ -1890,6 +1936,40 @@ def test_retention_expiry_is_rechecked_at_consume_without_mutation(
             ids=_ids(),
         ).invoke(actor_context=actor, authorization=authorization)
 
+    assert _snapshot(postgres_connections) == before
+
+
+def test_runtime_rejects_lease_that_outlives_actor_and_grant_without_mutation(
+    postgres_connections,
+):
+    actor, skill = _persisted_skill(
+        postgres_connections,
+        actor_expires_at=_ts(NOW + timedelta(minutes=2)),
+    )
+    authorization = _authority(postgres_connections).issue(
+        actor_context=actor,
+        command=_execution_command(actor, skill),
+    )
+    runtime = PostgresBuiltinExecutionRuntime(
+        runtime_connect=postgres_connections["app"],
+        clock=lambda: NOW,
+        ids=_ids(),
+        lease_duration=timedelta(minutes=3),
+    )
+    invoked = False
+
+    def record_invoke(_registry, *, request):
+        nonlocal invoked
+        del request
+        invoked = True
+        raise AssertionError("handler must not run beyond the authorization window")
+
+    before = _snapshot(postgres_connections)
+    with patch.object(BuiltinHandlerRegistry, "invoke", new=record_invoke):
+        with pytest.raises(Exception):
+            runtime.invoke(actor_context=actor, authorization=authorization)
+
+    assert invoked is False
     assert _snapshot(postgres_connections) == before
 
 

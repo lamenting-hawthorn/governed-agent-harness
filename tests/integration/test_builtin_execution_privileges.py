@@ -24,6 +24,10 @@ WRITER_FUNCTIONS = (
     "gah_authorize_builtin_execution(jsonb,jsonb)",
     "gah_commit_evidence(jsonb,jsonb)",
 )
+PRIVATE_FUNCTIONS = (
+    "gah_skill_lifecycle_sink_command_valid(text,text,text,integer,text,jsonb)",
+    "gah_builtin_execution_lease_within_authority()",
+)
 
 
 def test_execution_acl_is_narrow_and_security_definer_search_path_is_fixed(
@@ -71,6 +75,25 @@ def test_execution_acl_is_narrow_and_security_definer_search_path_is_fixed(
                 (function,),
             )
             assert cursor.fetchone()[0] is False
+        for function in PRIVATE_FUNCTIONS:
+            for role in (
+                "public",
+                "gah_runtime",
+                "gah_authority_writer",
+                "gah_skill_lifecycle_authority",
+                "gah_execution_admission_authority",
+            ):
+                cursor.execute(
+                    "SELECT has_function_privilege(%s, %s, 'EXECUTE')",
+                    (role, function),
+                )
+                assert cursor.fetchone()[0] is False
+            cursor.execute(
+                "SELECT pg_get_userbyid(proowner), proconfig "
+                "FROM pg_proc WHERE oid=%s::regprocedure",
+                (function,),
+            )
+            assert cursor.fetchone() == ("gah_schema_owner", ["search_path=pg_catalog, public"])
         cursor.execute(
             "SELECT has_table_privilege('gah_runtime', "
             "'gah_builtin_execution_state', 'SELECT,INSERT,UPDATE,DELETE')"
@@ -86,6 +109,24 @@ def test_execution_acl_is_narrow_and_security_definer_search_path_is_fixed(
             "WHERE oid='gah_builtin_execution_state'::regclass"
         )
         assert cursor.fetchone() == (True, True)
+        cursor.execute(
+            "SELECT qual::text, with_check::text FROM pg_policies "
+            "WHERE schemaname='public' AND tablename='gah_builtin_execution_state' "
+            "AND policyname='gah_builtin_execution_state_scope'"
+        )
+        policy = cursor.fetchone()
+        assert policy is not None
+        assert all(
+            binding in policy[0] and binding in policy[1]
+            for binding in ("gah.session_id", "gah.actor_context_digest")
+        )
+        cursor.execute(
+            "SELECT tgenabled FROM pg_trigger "
+            "WHERE tgrelid='gah_builtin_execution_state'::regclass "
+            "AND tgname='gah_builtin_execution_lease_authority_guard' "
+            "AND NOT tgisinternal"
+        )
+        assert cursor.fetchone() == ("O",)
         cursor.execute(
             "SELECT relrowsecurity, relforcerowsecurity FROM pg_class "
             "WHERE oid='gah_execution_proof_keys'::regclass"

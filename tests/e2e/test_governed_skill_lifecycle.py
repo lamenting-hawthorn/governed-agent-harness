@@ -93,6 +93,76 @@ def _persisted_command(postgres_connections):
     return actor, command
 
 
+def _rebind_lifecycle_command(command):
+    """Recompute digests without repairing deliberately changed semantics."""
+
+    proposal = command["skill_proposal"]
+    apply_object_digest(proposal)
+    policy = command["policy_decision"]
+    policy["request_digest"] = proposal["proposal_digest"]
+    apply_object_digest(policy)
+    gate = command["gate_decision"]
+    gate["proposal_refs"] = [
+        ref("skill_proposal", proposal["proposal_id"], proposal["proposal_digest"])
+    ]
+    apply_object_digest(gate)
+    delivery = command["delivery_envelope"]
+    delivery["artifact_digest"] = sha256_digest(command["artifact"])
+    delivery["gate_decision_ref"] = ref("gate_decision", gate["gate_id"], gate["decision_digest"])
+    delivery["policy_refs"] = [
+        ref("policy_decision", policy["decision_id"], policy["decision_digest"])
+    ]
+    apply_object_digest(delivery)
+
+
+def _mutate_lifecycle_sink_field(command, path, *, missing):
+    container = command
+    for key in path[:-1]:
+        container = container[key]
+    if missing:
+        container.pop(path[-1], None)
+    else:
+        container[path[-1]] = None
+
+    root = path[0]
+    proposal = command["skill_proposal"]
+    policy = command["policy_decision"]
+    gate = command["gate_decision"]
+    delivery = command["delivery_envelope"]
+    if root == "skill_proposal":
+        apply_object_digest(proposal)
+        policy["request_digest"] = proposal["proposal_digest"]
+        apply_object_digest(policy)
+        gate["proposal_refs"] = [
+            ref("skill_proposal", proposal["proposal_id"], proposal["proposal_digest"])
+        ]
+        apply_object_digest(gate)
+        delivery["gate_decision_ref"] = ref(
+            "gate_decision", gate["gate_id"], gate["decision_digest"]
+        )
+        delivery["policy_refs"] = [
+            ref("policy_decision", policy["decision_id"], policy["decision_digest"])
+        ]
+        apply_object_digest(delivery)
+    elif root == "gate_decision":
+        apply_object_digest(gate)
+        delivery["gate_decision_ref"] = ref(
+            "gate_decision", gate["gate_id"], gate["decision_digest"]
+        )
+        apply_object_digest(delivery)
+    elif root == "policy_decision":
+        apply_object_digest(policy)
+        delivery["policy_refs"] = [
+            ref("policy_decision", policy["decision_id"], policy["decision_digest"])
+        ]
+        apply_object_digest(delivery)
+    elif root == "delivery_envelope":
+        apply_object_digest(delivery)
+    elif root == "artifact":
+        delivery["artifact_digest"] = sha256_digest(command.get("artifact"))
+        apply_object_digest(delivery)
+
+
 class _AcceptingVerifier:
     def verify(self, **values: object) -> bool:
         return True
@@ -120,6 +190,26 @@ def _receipt_trust(now: datetime) -> TrustContext:
             }
         ),
         trust_policy_version="skill-lifecycle.test.v1",
+    )
+
+
+def _approval_trust(now: datetime) -> TrustContext:
+    return TrustContext(
+        now=now,
+        trusted_keys=(
+            TrustedKey(
+                issuer="policy.authority",
+                key_id="policy.key.v1",
+                algorithms=frozenset({"fixture-proof-v1"}),
+                valid_from=now - timedelta(days=1),
+                valid_until=now + timedelta(days=1),
+            ),
+        ),
+        allowed_algorithms=frozenset({"fixture-proof-v1"}),
+        allowed_proof_domains=frozenset({"approval_record.v1"}),
+        expected_issuers=frozenset({"policy.authority"}),
+        allowed_domain_issuers=frozenset({("approval_record.v1", "policy.authority")}),
+        trust_policy_version="skill-lifecycle.approval-test.v1",
     )
 
 
@@ -230,6 +320,99 @@ def test_replay_is_resolved_before_a_second_lifecycle_evidence_append(postgres_c
         assert cursor.fetchone()[0] == transition_count
     assert replay.replayed is True
     assert replay.transition_digest == first.transition_digest
+
+
+def test_exact_lifecycle_replay_precedes_current_validity_validation(postgres_connections):
+    actor, install = _persisted_command(postgres_connections)
+    clock = [RECEIPT_NOW]
+    authority = PostgresSkillLifecycleAuthority(
+        privileged_connect=postgres_connections["skill_authority"],
+        evidence_writer_connect=postgres_connections["writer"],
+        clock=lambda: clock[0],
+        ids=_ids(),
+        receipt_verifier=_AcceptingVerifier(),
+        receipt_trust=_receipt_trust,
+    )
+    authority.install_skill(actor_context=actor, **install)
+    receipt = _activation_receipt(install)
+    receipt["expires_at"] = "2027-01-01T00:00:00.000Z"
+    apply_object_digest(receipt)
+    activate = copy.deepcopy(install)
+    activate.update(
+        {
+            "operation_id": "skill-expiring-activation-replay",
+            "expected_revision": 1,
+            "activation_receipt": receipt,
+        }
+    )
+    first = authority.activate_skill(actor_context=actor, **activate)
+    clock[0] = datetime(2028, 1, 1, tzinfo=timezone.utc)
+    before = _skill_authority_snapshot(postgres_connections)
+
+    replay = authority.activate_skill(actor_context=actor, **activate)
+
+    assert replay.replayed is True
+    assert replay.transition_digest == first.transition_digest
+    assert _skill_authority_snapshot(postgres_connections) == before
+
+    changed_actor = copy.deepcopy(actor)
+    changed_actor["correlation_id"] = "018f0000-0000-7000-8000-00000000ffef"
+    with pytest.raises(Exception):
+        authority.activate_skill(actor_context=changed_actor, **activate)
+    assert _skill_authority_snapshot(postgres_connections) == before
+
+
+def test_exact_approval_required_replay_survives_approval_expiry(postgres_connections):
+    actor, command = _persisted_command(postgres_connections)
+    policy = command["policy_decision"]
+    policy["decision"] = "require_approval"
+    apply_object_digest(policy)
+    approval = copy.deepcopy(build_positive_records()["approval_record"])
+    approval.update(
+        {
+            "tenant_id": actor["tenant_id"],
+            "request_id": command["skill_proposal"]["proposal_id"],
+            "request_digest": command["skill_proposal"]["proposal_digest"],
+            "policy_decision_id": policy["decision_id"],
+            "policy_decision_digest": policy["decision_digest"],
+            "constraints": copy.deepcopy(policy["constraints"]),
+            "expires_at": "2027-01-01T00:00:00.000Z",
+        }
+    )
+    apply_object_digest(approval)
+    command["approvals"] = [approval]
+    delivery = command["delivery_envelope"]
+    delivery["policy_refs"] = [
+        ref("policy_decision", policy["decision_id"], policy["decision_digest"])
+    ]
+    delivery["reviewer_refs"] = [
+        ref("approval_record", approval["approval_id"], approval["approval_digest"])
+    ]
+    apply_object_digest(delivery)
+    clock = [NOW]
+    authority = PostgresSkillLifecycleAuthority(
+        privileged_connect=postgres_connections["skill_authority"],
+        evidence_writer_connect=postgres_connections["writer"],
+        clock=lambda: clock[0],
+        ids=_ids(),
+        approval_verifier=_AcceptingVerifier(),
+        approval_trust=_approval_trust,
+    )
+    first = authority.install_skill(actor_context=actor, **command)
+    clock[0] = datetime(2028, 1, 1, tzinfo=timezone.utc)
+    before = _skill_authority_snapshot(postgres_connections)
+
+    replay = authority.install_skill(actor_context=actor, **command)
+
+    assert replay.replayed is True
+    assert replay.transition_digest == first.transition_digest
+    assert _skill_authority_snapshot(postgres_connections) == before
+
+    changed = copy.deepcopy(command)
+    changed["retention"]["expires_at"] = "2027-06-01T00:00:00.000Z"
+    with pytest.raises(Exception, match="replay conflicts"):
+        authority.install_skill(actor_context=actor, **changed)
+    assert _skill_authority_snapshot(postgres_connections) == before
 
 
 def test_e2e_lifecycle_matrix_accepts_canonical_null_optional_receipts(postgres_connections):
@@ -560,6 +743,28 @@ def _authorize_lifecycle(writer_connection, actor, operation, command):
         return cursor.fetchone()[0]
 
 
+def _rebind_direct_lifecycle_evidence(evidence, *, actor, wire, writer_authorization):
+    rebound = copy.deepcopy(evidence)
+    payload = rebound["draft"]["inline_payload"]
+    payload.update(
+        {
+            "actor_id": actor["actor_id"],
+            "operation_id": wire["operation_id"],
+            "operation_digest": wire["operation_digest"],
+            "skill_id": wire["skill_proposal"]["artifact_id"],
+            "command": wire,
+            "writer_authorization": writer_authorization,
+        }
+    )
+    rebound["payload_digest"] = sha256_digest(payload)
+    rebound["draft"]["idempotency"]["operation_digest"] = rebound["payload_digest"]
+    rebound["draft_digest"] = sha256_digest(rebound["draft"])
+    unsigned_envelope = copy.deepcopy(rebound)
+    unsigned_envelope.pop("event_digest")
+    rebound["event_digest"] = sha256_digest(unsigned_envelope)
+    return rebound
+
+
 def _direct_apply(postgres_connections, actor, function, wire, barrier=None):
     if barrier is not None:
         barrier.wait(timeout=5)
@@ -785,6 +990,237 @@ def test_direct_lifecycle_sql_rejects_corrupted_digest_without_mutation(
             "(SELECT count(*) FROM gah_active_skill_projection)"
         )
         assert cursor.fetchone() == (1, 0, 0)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda command: command["gate_decision"].__setitem__("tenant_id", "tenant-cross"),
+        lambda command: command["delivery_envelope"].__setitem__("tenant_id", "tenant-cross"),
+        lambda command: command["policy_decision"].__setitem__("tenant_id", "tenant-cross"),
+        lambda command: command["gate_decision"]["target_scope"].__setitem__(
+            "actor_id", "actor-cross"
+        ),
+        lambda command: command["delivery_envelope"]["target_scope"].__setitem__(
+            "actor_id", "actor-cross"
+        ),
+        lambda command: command["delivery_envelope"].__setitem__("artifact_id", "skill-cross"),
+        lambda command: command["delivery_envelope"].__setitem__("lifecycle_state", "activated"),
+    ),
+)
+def test_direct_lifecycle_sql_rejects_cross_record_binding_attacks_without_mutation(
+    postgres_connections,
+    mutate,
+):
+    actor, command = _persisted_command(postgres_connections)
+    valid_wire = _direct_lifecycle_wire(postgres_connections, actor, command)
+    mutate(command)
+    _rebind_lifecycle_command(command)
+    with postgres_connections["writer"]() as writer_connection:
+        authorization = _authorize_lifecycle(writer_connection, actor, "install", command)
+        command_wire = build_skill_lifecycle_wire_command("install", command)
+        wire = {
+            **command_wire,
+            "transition_evidence": _rebind_direct_lifecycle_evidence(
+                valid_wire["transition_evidence"],
+                actor=actor,
+                wire=command_wire,
+                writer_authorization=authorization,
+            ),
+        }
+        before = _skill_authority_snapshot(postgres_connections)
+        with pytest.raises(Exception, match="gah_skill_artifact_command_sink_guard"):
+            _direct_apply(postgres_connections, actor, "gah_install_skill", wire)
+    assert _skill_authority_snapshot(postgres_connections) == before
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        ("policy_decision", "tenant_id"),
+        ("gate_decision", "target_scope"),
+        ("artifact",),
+        ("skill_proposal", "artifact_revision"),
+        ("delivery_envelope", "lifecycle_state"),
+        ("delivery_envelope", "artifact_digest"),
+    ),
+)
+@pytest.mark.parametrize("missing", (True, False), ids=("missing", "json-null"))
+def test_direct_lifecycle_sink_rejects_missing_or_null_bindings_without_mutation(
+    postgres_connections,
+    path,
+    missing,
+):
+    actor, command = _persisted_command(postgres_connections)
+    valid_wire = _direct_lifecycle_wire(postgres_connections, actor, command)
+    _mutate_lifecycle_sink_field(command, path, missing=missing)
+    with postgres_connections["writer"]() as writer_connection:
+        authorization = _authorize_lifecycle(writer_connection, actor, "install", command)
+        command_wire = build_skill_lifecycle_wire_command("install", command)
+        wire = {
+            **command_wire,
+            "transition_evidence": _rebind_direct_lifecycle_evidence(
+                valid_wire["transition_evidence"],
+                actor=actor,
+                wire=command_wire,
+                writer_authorization=authorization,
+            ),
+        }
+        before = _skill_authority_snapshot(postgres_connections)
+        with pytest.raises(Exception):
+            _direct_apply(postgres_connections, actor, "gah_install_skill", wire)
+    assert _skill_authority_snapshot(postgres_connections) == before
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("archive", {"format": "zip", "bytes": "AA=="}),
+        ("protected_payload", {"ciphertext": "AA=="}),
+        ("remote_uri", "https://example.invalid/skill.json"),
+        ("entrypoint", "unsafe.py"),
+        ("payload", "x" * (64 * 1024)),
+    ),
+)
+def test_direct_lifecycle_sql_rejects_non_inert_or_oversized_artifacts_without_mutation(
+    postgres_connections,
+    field,
+    value,
+):
+    actor, command = _persisted_command(postgres_connections)
+    valid_wire = _direct_lifecycle_wire(postgres_connections, actor, command)
+    command["artifact"][field] = value
+    command["skill_proposal"]["artifact"] = copy.deepcopy(command["artifact"])
+    _rebind_lifecycle_command(command)
+    with postgres_connections["writer"]() as writer_connection:
+        authorization = _authorize_lifecycle(writer_connection, actor, "install", command)
+        command_wire = build_skill_lifecycle_wire_command("install", command)
+        wire = {
+            **command_wire,
+            "transition_evidence": _rebind_direct_lifecycle_evidence(
+                valid_wire["transition_evidence"],
+                actor=actor,
+                wire=command_wire,
+                writer_authorization=authorization,
+            ),
+        }
+        before = _skill_authority_snapshot(postgres_connections)
+        with pytest.raises(Exception, match="gah_skill_artifact_command_sink_guard"):
+            _direct_apply(postgres_connections, actor, "gah_install_skill", wire)
+    assert _skill_authority_snapshot(postgres_connections) == before
+
+
+def test_transition_sink_rechecks_cross_record_bindings_without_mutation(
+    postgres_connections,
+):
+    actor, install = _persisted_command(postgres_connections)
+    PostgresSkillLifecycleAuthority(
+        privileged_connect=postgres_connections["skill_authority"],
+        evidence_writer_connect=postgres_connections["writer"],
+        clock=lambda: RECEIPT_NOW,
+        ids=_ids(),
+    ).install_skill(actor_context=actor, **install)
+    activate = copy.deepcopy(install)
+    activate.update(
+        {
+            "operation_id": "skill-transition-sink-guard",
+            "expected_revision": 1,
+            "activation_receipt": _activation_receipt(install),
+        }
+    )
+    valid_wire = _direct_lifecycle_wire(
+        postgres_connections,
+        actor,
+        activate,
+        operation="activate",
+        now=RECEIPT_NOW,
+    )
+    activate["gate_decision"]["target_scope"]["actor_id"] = "actor-cross"
+    _rebind_lifecycle_command(activate)
+    activate["activation_receipt"] = _activation_receipt(activate)
+    with postgres_connections["writer"]() as writer_connection:
+        authorization = _authorize_lifecycle(writer_connection, actor, "activate", activate)
+        command_wire = build_skill_lifecycle_wire_command("activate", activate)
+        wire = {
+            **command_wire,
+            "transition_evidence": _rebind_direct_lifecycle_evidence(
+                valid_wire["transition_evidence"],
+                actor=actor,
+                wire=command_wire,
+                writer_authorization=authorization,
+            ),
+        }
+        before = _skill_authority_snapshot(postgres_connections)
+        with pytest.raises(Exception, match="gah_skill_transition_command_sink_guard"):
+            _direct_apply(postgres_connections, actor, "gah_activate_skill", wire)
+    assert _skill_authority_snapshot(postgres_connections) == before
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        ("policy_decision", "tenant_id"),
+        ("gate_decision", "target_scope"),
+        ("artifact",),
+        ("skill_proposal", "artifact_revision"),
+        ("delivery_envelope", "lifecycle_state"),
+        ("delivery_envelope", "artifact_digest"),
+    ),
+)
+@pytest.mark.parametrize("missing", (True, False), ids=("missing", "json-null"))
+def test_transition_table_sink_rejects_missing_or_null_bindings_without_mutation(
+    postgres_connections,
+    path,
+    missing,
+):
+    actor, install = _persisted_command(postgres_connections)
+    PostgresSkillLifecycleAuthority(
+        privileged_connect=postgres_connections["skill_authority"],
+        evidence_writer_connect=postgres_connections["writer"],
+        clock=lambda: RECEIPT_NOW,
+        ids=_ids(),
+    ).install_skill(actor_context=actor, **install)
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT command_json,evidence_json,evidence_event_digest "
+            "FROM gah_skill_lifecycle_transitions "
+            "WHERE tenant_id=%s AND operation_id=%s",
+            (actor["tenant_id"], install["operation_id"]),
+        )
+        stored_command, evidence, evidence_digest = cursor.fetchone()
+
+    command = copy.deepcopy(stored_command)
+    command["operation_id"] = (
+        f"transition-null-guard-{'missing' if missing else 'null'}-{'-'.join(path)}"
+    )
+    command.pop("operation_digest")
+    _mutate_lifecycle_sink_field(command, path, missing=missing)
+    command_without_wire = copy.deepcopy(command)
+    command_without_wire.pop("operation")
+    wire = build_skill_lifecycle_wire_command("install", command_without_wire)
+    before = _skill_authority_snapshot(postgres_connections)
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        with pytest.raises(Exception, match="gah_skill_transition_command_sink_guard"):
+            cursor.execute(
+                "INSERT INTO gah_skill_lifecycle_transitions "
+                "(tenant_id,actor_id,skill_id,transition_sequence,operation_id,"
+                "operation,operation_digest,expected_revision,target_revision,"
+                "from_state,to_state,command_json,evidence_json,evidence_event_digest) "
+                "VALUES (%s,%s,%s,2,%s,'install',%s,NULL,1,'installed','installed',"
+                "%s::jsonb,%s::jsonb,%s)",
+                (
+                    actor["tenant_id"],
+                    actor["actor_id"],
+                    install["skill_proposal"]["artifact_id"],
+                    wire["operation_id"],
+                    wire["operation_digest"],
+                    json.dumps(wire),
+                    json.dumps(evidence),
+                    evidence_digest,
+                ),
+            )
+        connection.rollback()
+    assert _skill_authority_snapshot(postgres_connections) == before
 
 
 def test_non_approving_gate_is_rejected_without_mutation(postgres_connections):

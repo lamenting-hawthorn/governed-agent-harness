@@ -19,6 +19,7 @@ from typing import Any, Protocol
 from governed_agent_harness.contracts import (
     DetachedProofVerifier,
     TrustContext,
+    sha256_digest,
     skill_lifecycle_operation_digest,
     validate_skill_lifecycle_command,
 )
@@ -125,6 +126,28 @@ def build_skill_lifecycle_wire_command(
     wire = {"operation": operation, **dict(command)}
     wire["operation_digest"] = skill_lifecycle_operation_digest(wire)
     return wire
+
+
+def _historical_replay_actor_binding_matches(
+    actor_context: Mapping[str, Any],
+    wire: Mapping[str, Any],
+    operation: str,
+) -> bool:
+    if operation == "rebuild":
+        return True
+    proposal = wire.get("skill_proposal")
+    if not isinstance(proposal, Mapping):
+        return False
+    scope = proposal.get("target_scope")
+    if not isinstance(scope, Mapping):
+        return False
+    return (
+        actor_context.get("record_type") == "actor_context"
+        and proposal.get("tenant_id") == actor_context.get("tenant_id")
+        and scope.get("actor_id") == actor_context.get("actor_id")
+        and scope.get("selection") == {"level": "actor"}
+        and scope.get("parent_digest") == sha256_digest(dict(actor_context))
+    )
 
 
 def _result(
@@ -267,6 +290,25 @@ class PostgresSkillLifecycleAuthority:
         command: Mapping[str, Any],
     ) -> SkillLifecycleResult:
         wire = build_skill_lifecycle_wire_command(operation, command)
+        digest = wire["operation_digest"]
+        expected_transition_digest = None
+        if _historical_replay_actor_binding_matches(actor_context, wire, operation):
+            with self._privileged_connect() as connection, connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT gah_lookup_skill_replay(%s::jsonb, %s::jsonb)",
+                    (_json(actor_context), _json(wire)),
+                )
+                replay = cursor.fetchone()
+                if replay is not None and replay[0] is not None:
+                    return _result(
+                        replay[0],
+                        expected_operation_id=wire["operation_id"],
+                        expected_digest=digest,
+                        expected_skill_id=wire["skill_id"]
+                        if operation == "rebuild"
+                        else wire["skill_proposal"]["artifact_id"],
+                        **_expected_result_bindings(operation, wire),
+                    )
         digest = validate_skill_lifecycle_command(
             actor_context=actor_context,
             command=wire,
@@ -276,23 +318,6 @@ class PostgresSkillLifecycleAuthority:
             receipt_verifier=self._receipt_verifier,
             receipt_trust=self._receipt_trust,
         )
-        expected_transition_digest = None
-        with self._privileged_connect() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT gah_lookup_skill_replay(%s::jsonb, %s::jsonb)",
-                (_json(actor_context), _json(wire)),
-            )
-            replay = cursor.fetchone()
-            if replay is not None and replay[0] is not None:
-                return _result(
-                    replay[0],
-                    expected_operation_id=wire["operation_id"],
-                    expected_digest=digest,
-                    expected_skill_id=wire["skill_id"]
-                    if operation == "rebuild"
-                    else wire["skill_proposal"]["artifact_id"],
-                    **_expected_result_bindings(operation, wire),
-                )
         if operation == "rebuild":
             with self._privileged_connect() as connection, connection.cursor() as cursor:
                 cursor.execute(

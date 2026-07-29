@@ -63,6 +63,7 @@ def test_packaged_migrations_are_contiguous_and_checksum_exact() -> None:
         (9, "0009_fix_skill_lifecycle_predicates.sql"),
         (10, "0010_skill_lifecycle_authority_split.sql"),
         (11, "0011_builtin_execution_admission.sql"),
+        (12, "0012_harden_lifecycle_and_execution_authority.sql"),
     ]
     assert migrations[0].checksum.startswith("sha256:")
     assert len(migrations[0].checksum) == 71
@@ -129,7 +130,7 @@ def test_phase44_registered_schema_upgrades_once_to_execution_admission(
     connect = migration_database["connect"]
     assert callable(connect)
     packaged = discover_migrations()
-    phase44 = packaged[:-1]
+    phase44 = packaged[:10]
     monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase44)
     assert apply_migrations(admin_connect=connect) == phase44
     monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
@@ -182,11 +183,11 @@ def test_execution_native_extension_identity_gate_rolls_back_on_missing_or_wrong
     connect = migration_database["connect"]
     assert callable(connect)
     packaged = discover_migrations()
-    phase44 = packaged[:-1]
+    phase44 = packaged[:10]
     monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase44)
     assert apply_migrations(admin_connect=connect) == phase44
 
-    candidate = packaged[-1]
+    candidate = packaged[10]
     original, changed = replacement
     modified_sql = candidate.sql.replace(original, changed)
     assert modified_sql != candidate.sql
@@ -284,6 +285,7 @@ def test_advisory_lock_serializes_concurrent_fresh_installers(
         (9, 1),
         (10, 1),
         (11, 1),
+        (12, 1),
     ]
 
 
@@ -480,10 +482,10 @@ def test_checksum_drift_and_unknown_version_are_rejected(
             (discover_migrations()[0].checksum,),
         )
         cursor.execute(
-            "INSERT INTO gah_schema_migrations (version, checksum) VALUES (12, %s)",
+            "INSERT INTO gah_schema_migrations (version, checksum) VALUES (13, %s)",
             ("sha256:" + "1" * 64,),
         )
-    with pytest.raises(MigrationError, match="unknown migration version 0012"):
+    with pytest.raises(MigrationError, match="unknown migration version 0013"):
         apply_migrations(admin_connect=connect)
 
 
@@ -511,8 +513,8 @@ def test_failed_migration_rolls_back_registry_and_schema(
 
     packaged = discover_migrations()
     broken = Migration(
-        version=12,
-        name="0012_broken.sql",
+        version=13,
+        name="0013_broken.sql",
         checksum="sha256:" + "2" * 64,
         sql="CREATE TABLE gah_partial (id integer); SELECT definitely_not_a_function()",
     )
