@@ -1,5 +1,0 @@
-comment = 'GAH verify-only Ed25519 detached-signature primitive'
-default_version = '1.0'
-module_pathname = '$libdir/gah_ed25519'
-relocatable = false
-schema = gah_crypto
