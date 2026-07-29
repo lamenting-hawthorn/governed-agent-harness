@@ -206,6 +206,8 @@ def test_wrapper_and_sql_receive_one_complete_wire_shape() -> None:
 
         def fetchone(self):
             query = captured["query"]
+            if "gah_lock_skill_lifecycle_draft" in query:
+                return (None,)
             if "gah_lookup_skill_replay" in query:
                 return (None,)
             if "gah_authorize_skill_lifecycle" in query:

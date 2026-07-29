@@ -38,6 +38,7 @@ from governed_agent_harness.persistence import (
     PostgresSkillLifecycleAuthority,
     execution_operation_digest,
 )
+from governed_agent_harness.persistence.skills import build_skill_lifecycle_wire_command
 from skill_lifecycle_support import command as build_skill_command, ref
 
 
@@ -448,6 +449,92 @@ def _counts(postgres_connections):
     return state, evidence
 
 
+def _wait_for_writer_run_head_lock(postgres_connections) -> bool:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        with (
+            postgres_connections["admin"]() as connection,
+            connection.cursor() as cursor,
+        ):
+            cursor.execute(
+                "SELECT EXISTS ("
+                "SELECT 1 FROM pg_stat_activity "
+                "WHERE usename='gah_writer' AND wait_event_type='Lock' "
+                "AND position('gah_lock_run' in query) > 0"
+                ")"
+            )
+            if cursor.fetchone()[0]:
+                return True
+        time.sleep(0.01)
+    return False
+
+
+def _wait_for_writer_commit_lock(postgres_connections) -> bool:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT EXISTS ("
+                "SELECT 1 FROM pg_stat_activity "
+                "WHERE usename='gah_writer' AND wait_event_type='Lock' "
+                "AND position('gah_commit_evidence' in query) > 0"
+                ")"
+            )
+            if cursor.fetchone()[0]:
+                return True
+        time.sleep(0.01)
+    return False
+
+
+def _wait_for_role_query_lock(postgres_connections, role: str, query_fragment: str) -> bool:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT EXISTS ("
+                "SELECT 1 FROM pg_stat_activity "
+                "WHERE usename=%s AND wait_event_type='Lock' "
+                "AND position(%s in query) > 0"
+                ")",
+                (role, query_fragment),
+            )
+            if cursor.fetchone()[0]:
+                return True
+        time.sleep(0.01)
+    return False
+
+
+def _wait_for_skill_authority_lock(postgres_connections, query_fragment: str) -> bool:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        with (
+            postgres_connections["admin"]() as connection,
+            connection.cursor() as cursor,
+        ):
+            cursor.execute(
+                "SELECT EXISTS ("
+                "SELECT 1 FROM pg_stat_activity "
+                "WHERE usename='gah_skill_authority' AND wait_event_type='Lock' "
+                "AND position(%s in query) > 0"
+                ")",
+                (query_fragment,),
+            )
+            if cursor.fetchone()[0]:
+                return True
+        time.sleep(0.01)
+    return False
+
+
+def _authorize_lifecycle_writer(cursor, actor, wire):
+    cursor.execute(
+        "SELECT gah_authorize_skill_lifecycle(%s::jsonb, %s::jsonb)",
+        (json.dumps(actor), json.dumps(wire)),
+    )
+    row = cursor.fetchone()
+    assert row is not None and row[0] is not None
+    return row[0]
+
+
 def _snapshot(postgres_connections):
     with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
         cursor.execute(
@@ -695,7 +782,12 @@ def _direct_issue_with_live_writer_and_tampered_approval(
         approval=wire["approvals"][0],
         grant=grant,
     )
-    _tamper_proof_field(wire["approvals"][0]["proof"], proof_field)
+    if proof_field == "revoked_at":
+        wire["approvals"][0]["revoked_at"] = _ts(NOW - timedelta(seconds=1))
+        apply_object_digest(wire["approvals"][0])
+        wire["approvals"][0]["proof"]["object_digest"] = wire["approvals"][0]["approval_digest"]
+    else:
+        _tamper_proof_field(wire["approvals"][0]["proof"], proof_field)
     unsigned_command = copy.deepcopy(wire)
     unsigned_command.pop("operation_digest")
     wire["operation_digest"] = execution_operation_digest(unsigned_command)
@@ -806,6 +898,293 @@ def test_exact_active_digest_executes_once_and_replays_after_restart(postgres_co
     assert rebuilt_replay.outcome == first.outcome
     assert rebuilt_replay.replayed is True
     assert len(calls) == 1
+
+
+def test_revoked_approval_is_rejected_before_authority_mutation(postgres_connections):
+    actor, skill = _persisted_skill(postgres_connections)
+    command = _execution_command(actor, skill, operation_id="phase5-revoked-approval-rejected")
+    command["approvals"][0]["revoked_at"] = _ts(NOW - timedelta(seconds=1))
+    before = _snapshot(postgres_connections)
+
+    with pytest.raises(Exception, match="approval is revoked"):
+        _authority(postgres_connections).issue(actor_context=actor, command=command)
+
+    assert _snapshot(postgres_connections) == before
+
+
+def test_exact_authorization_replay_rejects_admin_poisoned_revoked_approval(
+    postgres_connections,
+):
+    actor, skill = _persisted_skill(postgres_connections)
+    command = _execution_command(actor, skill, operation_id="phase5-poisoned-revoked-replay")
+    _authority(postgres_connections).issue(actor_context=actor, command=command)
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE gah_builtin_execution_state SET command_json=jsonb_set("
+            "command_json,'{approvals,0,revoked_at}',to_jsonb(%s::text)) "
+            "WHERE tenant_id=%s AND actor_id=%s AND operation_id=%s "
+            "RETURNING command_json",
+            (
+                _ts(NOW - timedelta(seconds=1)),
+                actor["tenant_id"],
+                actor["actor_id"],
+                command["operation_id"],
+            ),
+        )
+        poisoned_command = cursor.fetchone()[0]
+    before = _snapshot(postgres_connections)
+
+    with (
+        postgres_connections["execution_authority"]() as connection,
+        connection.cursor() as cursor,
+    ):
+        with pytest.raises(Exception, match="persisted execution approval is revoked or malformed"):
+            cursor.execute(
+                "SELECT gah_lookup_builtin_execution_authorization(%s::jsonb,%s::jsonb)",
+                (execution_module._json(actor), execution_module._json(poisoned_command)),
+            )
+
+    assert _snapshot(postgres_connections) == before
+
+
+def test_recovery_requires_intent_and_leaves_authorization_consumable(
+    postgres_connections,
+):
+    actor, skill = _persisted_skill(postgres_connections)
+    authorization = _authority(postgres_connections).issue(
+        actor_context=actor,
+        command=_execution_command(actor, skill, operation_id="phase5-recovery-requires-intent"),
+    )
+    runtime = PostgresBuiltinExecutionRuntime(
+        runtime_connect=postgres_connections["app"],
+        clock=lambda: NOW,
+        ids=_ids(),
+    )
+    before = _snapshot(postgres_connections)
+
+    with pytest.raises(Exception, match="recovery requires a persisted intent"):
+        runtime.recover(actor_context=actor, authorization=authorization)
+
+    assert _snapshot(postgres_connections) == before
+    assert (
+        runtime.invoke(actor_context=actor, authorization=authorization).outcome["status"]
+        == "succeeded"
+    )
+
+
+def test_direct_sql_recovery_rejects_authorized_state_without_intent(
+    postgres_connections,
+):
+    actor, skill = _persisted_skill(postgres_connections)
+    authorization = _authority(postgres_connections).issue(
+        actor_context=actor,
+        command=_execution_command(
+            actor, skill, operation_id="phase5-direct-recovery-requires-intent"
+        ),
+    )
+    before = _snapshot(postgres_connections)
+    with postgres_connections["app"]() as connection, connection.cursor() as cursor:
+        with pytest.raises(Exception, match="recovery requires a persisted intent"):
+            cursor.execute(
+                "SELECT gah_recover_builtin_execution(%s::jsonb,%s::jsonb,%s::jsonb,%s::jsonb)",
+                (
+                    execution_module._json(actor),
+                    execution_module._json(
+                        {
+                            "operation_id": authorization.command["operation_id"],
+                            "operation_digest": authorization.command["operation_digest"],
+                        }
+                    ),
+                    "{}",
+                    "{}",
+                ),
+            )
+    assert _snapshot(postgres_connections) == before
+
+
+def test_direct_sql_recovery_succeeds_in_fresh_runtime_transaction(
+    postgres_connections,
+):
+    actor, skill = _persisted_skill(postgres_connections)
+    command = _execution_command(
+        actor, skill, operation_id="phase5-direct-fresh-transaction-recovery"
+    )
+    authorization = _authority(postgres_connections).issue(actor_context=actor, command=command)
+    issued_command = authorization.command
+    runtime = PostgresBuiltinExecutionRuntime(
+        runtime_connect=postgres_connections["app"],
+        clock=lambda: NOW,
+        ids=_ids(),
+        lease_duration=timedelta(milliseconds=100),
+    )
+
+    def crash(_registry, *, request):
+        del request
+        raise RuntimeError("simulated host crash")
+
+    with patch.object(BuiltinHandlerRegistry, "invoke", new=crash):
+        with pytest.raises(RuntimeError, match="simulated host crash"):
+            runtime.invoke(actor_context=actor, authorization=authorization)
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE gah_builtin_execution_state "
+            "SET lease_expires_at=clock_timestamp()-interval '1 second' "
+            "WHERE tenant_id=%s AND actor_id=%s AND operation_id=%s "
+            "RETURNING intent_evidence_json",
+            (actor["tenant_id"], actor["actor_id"], issued_command["operation_id"]),
+        )
+        intent = cursor.fetchone()[0]
+    outcome = runtime._outcome(
+        actor=actor,
+        request=issued_command["tool_request"],
+        policy=issued_command["policy_decision"],
+        approvals=tuple(issued_command["approvals"]),
+        grant=authorization.grant,
+        intent=intent,
+        result_payload={"error": "execution_outcome_unknown"},
+        status="indeterminate",
+    )
+    payload = {
+        "actor_id": actor["actor_id"],
+        "operation_id": issued_command["operation_id"],
+        "operation_digest": issued_command["operation_digest"],
+        "authorization_grant_digest": sha256_digest(authorization.grant),
+        "outcome_digest": outcome["outcome_digest"],
+        "status": "indeterminate",
+        "state": "indeterminate",
+        "outcome": outcome,
+    }
+    with postgres_connections["app"]() as connection, connection.cursor() as cursor:
+        evidence = execution_module._build_evidence(
+            actor=actor,
+            run_id=issued_command["tool_request"]["run_id"],
+            event_kind="execution.outcome",
+            policy=issued_command["policy_decision"],
+            payload=payload,
+            head=execution_module._head(cursor, actor, issued_command["tool_request"]["run_id"]),
+            clock=lambda: NOW,
+            ids=_ids(),
+        )
+        cursor.execute(
+            "SELECT gah_recover_builtin_execution(%s::jsonb,%s::jsonb,%s::jsonb,%s::jsonb)",
+            (
+                execution_module._json(actor),
+                execution_module._json(
+                    {
+                        "operation_id": issued_command["operation_id"],
+                        "operation_digest": issued_command["operation_digest"],
+                    }
+                ),
+                execution_module._json(outcome),
+                execution_module._json(evidence),
+            ),
+        )
+        recovered = cursor.fetchone()[0]
+
+    assert recovered["state"] == "indeterminate"
+    assert recovered["outcome"]["status"] == "indeterminate"
+
+
+def test_outcome_chronology_clamps_a_rollback_runtime_clock(postgres_connections):
+    actor, skill = _persisted_skill(postgres_connections)
+    authorization = _authority(postgres_connections).issue(
+        actor_context=actor,
+        command=_execution_command(actor, skill, operation_id="phase5-outcome-clock-rollback"),
+    )
+    values = iter((NOW, NOW - timedelta(days=1), NOW - timedelta(days=1)))
+
+    result = PostgresBuiltinExecutionRuntime(
+        runtime_connect=postgres_connections["app"],
+        clock=lambda: next(values),
+        ids=_ids(),
+    ).invoke(actor_context=actor, authorization=authorization)
+
+    occurred_at = datetime.fromisoformat(result.outcome["occurred_at"].replace("Z", "+00:00"))
+    intent_at = datetime.fromisoformat(result.intent_evidence["recorded_at"].replace("Z", "+00:00"))
+    assert occurred_at >= intent_at
+
+
+def test_direct_sql_rejects_outcome_backdated_before_persisted_intent(
+    postgres_connections,
+):
+    actor, skill = _persisted_skill(postgres_connections)
+    command = _execution_command(actor, skill, operation_id="phase5-direct-backdated-outcome")
+    authorization = _authority(postgres_connections).issue(actor_context=actor, command=command)
+    runtime = PostgresBuiltinExecutionRuntime(
+        runtime_connect=postgres_connections["app"],
+        clock=lambda: NOW,
+        ids=_ids(),
+    )
+
+    def crash(_registry, *, request):
+        del request
+        raise RuntimeError("simulated host crash")
+
+    with patch.object(BuiltinHandlerRegistry, "invoke", new=crash):
+        with pytest.raises(RuntimeError, match="simulated host crash"):
+            runtime.invoke(actor_context=actor, authorization=authorization)
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT intent_evidence_json,execution_attempt_id,owner_generation "
+            "FROM gah_builtin_execution_state WHERE operation_id=%s",
+            (command["operation_id"],),
+        )
+        intent, attempt_id, generation = cursor.fetchone()
+    outcome = runtime._outcome(
+        actor=actor,
+        request=command["tool_request"],
+        policy=command["policy_decision"],
+        approvals=tuple(command["approvals"]),
+        grant=authorization.grant,
+        intent=intent,
+        result_payload={"echo": {"message": "hello"}},
+        status="succeeded",
+    )
+    intent_at = datetime.fromisoformat(intent["recorded_at"].replace("Z", "+00:00"))
+    backdated = _ts(intent_at - timedelta(milliseconds=1))
+    outcome["occurred_at"] = backdated
+    outcome["target_scope"]["derived_at"] = backdated
+    apply_object_digest(outcome)
+    payload = {
+        "actor_id": actor["actor_id"],
+        "operation_id": command["operation_id"],
+        "operation_digest": authorization.command["operation_digest"],
+        "authorization_grant_digest": sha256_digest(authorization.grant),
+        "outcome_digest": outcome["outcome_digest"],
+        "status": "succeeded",
+        "state": "completed",
+        "outcome": outcome,
+    }
+    before = _snapshot(postgres_connections)
+    with postgres_connections["app"]() as connection, connection.cursor() as cursor:
+        evidence = execution_module._build_evidence(
+            actor=actor,
+            run_id=command["tool_request"]["run_id"],
+            event_kind="execution.outcome",
+            policy=command["policy_decision"],
+            payload=payload,
+            head=execution_module._head(cursor, actor, command["tool_request"]["run_id"]),
+            clock=lambda: NOW,
+            ids=_ids(),
+        )
+        with pytest.raises(Exception, match="outcome predates its persisted intent"):
+            cursor.execute(
+                "SELECT gah_complete_builtin_execution(%s::jsonb,%s::jsonb,%s::jsonb,%s::jsonb)",
+                (
+                    execution_module._json(actor),
+                    execution_module._json(
+                        {
+                            "operation_id": command["operation_id"],
+                            "operation_digest": authorization.command["operation_digest"],
+                            "attempt_id": attempt_id,
+                            "owner_generation": generation,
+                        }
+                    ),
+                    execution_module._json(outcome),
+                    execution_module._json(evidence),
+                ),
+            )
+    assert _snapshot(postgres_connections) == before
 
 
 def test_runtime_rejects_mutated_caller_authorization_before_handler_or_mutation(
@@ -1330,7 +1709,9 @@ def test_execution_issuance_and_skill_deactivation_have_no_deadlock_or_partial_s
         return f"{type(error).__name__}(sqlstate={sqlstate!r}): {error}"
 
     assert not any(
-        "deadlock detected" in str(error)
+        (getattr(error, "sqlstate", None) or getattr(error, "pgcode", None))
+        in {"40P01", "55P03", "57014"}
+        or "deadlock detected" in str(error)
         or "lock timeout" in str(error)
         or "statement timeout" in str(error)
         for error in errors
@@ -1383,6 +1764,402 @@ def test_execution_issuance_and_skill_deactivation_have_no_deadlock_or_partial_s
         assert state_count == issuance_count == 1
     else:
         assert state_count == issuance_count == 0
+
+
+def test_lifecycle_draft_lock_reads_advanced_run_head_after_skill_lock_wait(
+    postgres_connections,
+):
+    """A generic append waits behind a lifecycle-owned authoritative head."""
+
+    actor, skill = _persisted_skill(postgres_connections)
+    deactivate = copy.deepcopy(skill)
+    deactivate.update(
+        {
+            "operation_id": "phase5-draft-lock-deactivate",
+            "expected_revision": 1,
+            "activation_receipt": None,
+        }
+    )
+    head_locked = threading.Event()
+    release_lifecycle = threading.Event()
+    next_id = _ids()
+
+    def paused_ids() -> str:
+        head_locked.set()
+        if not release_lifecycle.wait(timeout=5):
+            raise RuntimeError("test did not release lifecycle evidence drafting")
+        return next_id()
+
+    authority = PostgresSkillLifecycleAuthority(
+        privileged_connect=postgres_connections["skill_authority"],
+        evidence_writer_connect=postgres_connections["writer"],
+        clock=lambda: NOW + timedelta(milliseconds=2),
+        ids=paused_ids,
+    )
+    completed = threading.Event()
+
+    def deactivate_skill():
+        try:
+            return authority.deactivate_skill(actor_context=actor, **deactivate)
+        finally:
+            completed.set()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        lifecycle_future = pool.submit(deactivate_skill)
+        assert head_locked.wait(timeout=5), "lifecycle never locked and read its run head"
+        append_future = pool.submit(
+            postgres_connections["store_at"](NOW + timedelta(milliseconds=3)).append,
+            tenant_id=actor["tenant_id"],
+            run_id=actor["session_id"],
+            event_kind="kernel.policy_decided",
+            policy_ref={
+                "record_type": "policy_decision",
+                "record_id": skill["policy_decision"]["decision_id"],
+                "record_digest": skill["policy_decision"]["decision_digest"],
+            },
+            payload={
+                "actor_id": actor["actor_id"],
+                "policy_decision_digest": skill["policy_decision"]["decision_digest"],
+            },
+        )
+        assert _wait_for_writer_run_head_lock(postgres_connections)
+        assert not append_future.done()
+        release_lifecycle.set()
+        result = lifecycle_future.result(timeout=8)
+        advanced = append_future.result(timeout=8)
+
+    assert result.replayed is False
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT sequence_number FROM gah_evidence_events "
+            "WHERE tenant_id=%s AND actor_id=%s AND run_id=%s AND event_digest=%s",
+            (
+                actor["tenant_id"],
+                actor["actor_id"],
+                actor["session_id"],
+                result.transition_digest,
+            ),
+        )
+        assert cursor.fetchone() == (advanced["sequence_number"] - 1,)
+    assert advanced["prior_event_digest"] == result.transition_digest
+
+
+def test_direct_commit_evidence_cannot_bypass_lifecycle_run_reservation(
+    postgres_connections,
+):
+    actor, skill = _persisted_skill(postgres_connections)
+    deactivate = copy.deepcopy(skill)
+    deactivate.update(
+        {
+            "operation_id": "phase5-direct-commit-reservation",
+            "expected_revision": 1,
+            "activation_receipt": None,
+        }
+    )
+    with postgres_connections["writer"]() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT gah_lock_run(%s::jsonb,%s::jsonb)",
+            (
+                execution_module._json(actor),
+                execution_module._json({"run_id": actor["session_id"]}),
+            ),
+        )
+        head = cursor.fetchone()[0]
+    generic_payload = {
+        "actor_id": actor["actor_id"],
+        "operation_id": "phase5-direct-generic-commit",
+        "operation_digest": sha256_digest({"kind": "direct-generic-commit"}),
+    }
+    generic_evidence = execution_module._build_evidence(
+        actor=actor,
+        run_id=actor["session_id"],
+        event_kind="kernel.policy_decided",
+        policy=skill["policy_decision"],
+        payload=generic_payload,
+        head=head,
+        clock=lambda: NOW + timedelta(milliseconds=3),
+        ids=_ids(),
+    )
+    commit_payload = {
+        "run_id": actor["session_id"],
+        "expected_version": head["version"],
+        "envelope": generic_evidence,
+    }
+    reserved = threading.Event()
+    release = threading.Event()
+    next_id = _ids()
+
+    def paused_ids():
+        reserved.set()
+        if not release.wait(timeout=5):
+            raise RuntimeError("test did not release lifecycle reservation")
+        return next_id()
+
+    authority = PostgresSkillLifecycleAuthority(
+        privileged_connect=postgres_connections["skill_authority"],
+        evidence_writer_connect=postgres_connections["writer"],
+        clock=lambda: NOW + timedelta(milliseconds=2),
+        ids=paused_ids,
+    )
+
+    def direct_commit():
+        try:
+            with (
+                postgres_connections["writer"]() as connection,
+                connection.cursor() as cursor,
+            ):
+                cursor.execute(
+                    "SELECT gah_commit_evidence(%s::jsonb,%s::jsonb)",
+                    (
+                        execution_module._json(actor),
+                        execution_module._json(commit_payload),
+                    ),
+                )
+                return ("committed", cursor.fetchone()[0])
+        except Exception as exc:
+            return ("rejected", str(exc))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        lifecycle = pool.submit(authority.deactivate_skill, actor_context=actor, **deactivate)
+        assert reserved.wait(timeout=5)
+        commit = pool.submit(direct_commit)
+        assert _wait_for_writer_commit_lock(postgres_connections)
+        assert not commit.done()
+        release.set()
+        transition = lifecycle.result(timeout=8)
+        commit_result = commit.result(timeout=8)
+    assert transition.replayed is False
+    assert commit_result[0] == "rejected"
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT count(*) FROM gah_evidence_events "
+            "WHERE envelope_json#>>'{draft,inline_payload,operation_id}'=%s",
+            (generic_payload["operation_id"],),
+        )
+        assert cursor.fetchone() == (0,)
+
+
+def test_begin_waits_for_operation_before_skill_so_deactivate_cannot_deadlock(
+    postgres_connections,
+):
+    actor, skill = _persisted_skill(postgres_connections)
+    authorization = _authority(postgres_connections).issue(
+        actor_context=actor,
+        command=_execution_command(actor, skill, operation_id="phase5-begin-deactivate-lock-order"),
+    )
+    command = authorization.command
+    start_payload = {
+        "actor_id": actor["actor_id"],
+        "operation_id": command["operation_id"],
+        "operation_digest": command["operation_digest"],
+        "authorization_grant_digest": sha256_digest(authorization.grant),
+        "skill_id": command["skill_id"],
+        "revision": command["revision"],
+        "artifact_digest": command["artifact_digest"],
+        "state": "executing",
+    }
+    with postgres_connections["app"]() as connection, connection.cursor() as cursor:
+        intent = execution_module._build_evidence(
+            actor=actor,
+            run_id=actor["session_id"],
+            event_kind="execution.intent",
+            policy=command["policy_decision"],
+            payload=start_payload,
+            head=execution_module._head(cursor, actor, actor["session_id"]),
+            clock=lambda: NOW,
+            ids=_ids(),
+        )
+    blocker = postgres_connections["admin"]()
+    blocker_cursor = blocker.cursor()
+    blocker_cursor.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+        (f"execution:operation:{actor['tenant_id']}:{command['operation_id']}",),
+    )
+
+    def begin():
+        try:
+            with postgres_connections["app"]() as connection, connection.cursor() as cursor:
+                cursor.execute("SET lock_timeout='5s'")
+                cursor.execute("SET statement_timeout='8s'")
+                cursor.execute(
+                    "SELECT gah_begin_builtin_execution(%s::jsonb,%s::jsonb,%s::jsonb,%s)",
+                    (
+                        execution_module._json(actor),
+                        execution_module._json(
+                            {
+                                "operation_id": command["operation_id"],
+                                "operation_digest": command["operation_digest"],
+                                "command": command,
+                                "grant": authorization.grant,
+                            }
+                        ),
+                        execution_module._json(intent),
+                        30,
+                    ),
+                )
+                return ("began", cursor.fetchone()[0])
+        except Exception as exc:
+            return ("rejected", str(exc))
+
+    deactivate = copy.deepcopy(skill)
+    deactivate.update(
+        {
+            "operation_id": "phase5-deactivate-while-begin-waits",
+            "expected_revision": 1,
+            "activation_receipt": None,
+        }
+    )
+    lifecycle = PostgresSkillLifecycleAuthority(
+        privileged_connect=postgres_connections["skill_authority"],
+        evidence_writer_connect=postgres_connections["writer"],
+        clock=lambda: datetime.now(timezone.utc) + timedelta(minutes=1),
+        ids=_ids(),
+    )
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            begin_future = pool.submit(begin)
+            assert _wait_for_role_query_lock(
+                postgres_connections, "gah_app", "gah_begin_builtin_execution"
+            )
+            deactivate_future = pool.submit(
+                lifecycle.deactivate_skill, actor_context=actor, **deactivate
+            )
+            deactivated = deactivate_future.result(timeout=6)
+            assert deactivated.replayed is False
+            blocker.commit()
+            begin_result = begin_future.result(timeout=8)
+    finally:
+        blocker.rollback()
+        blocker_cursor.close()
+        blocker.close()
+    assert begin_result[0] == "rejected"
+    assert "stale or expired" in begin_result[1]
+
+
+def test_same_operation_lifecycle_and_rebuild_follow_one_lock_order(postgres_connections):
+    """Lifecycle draft helper waits on O before it can own the shared S lock."""
+
+    actor, skill = _persisted_skill(postgres_connections)
+    operation_id = "phase5-same-operation-rebuild-race"
+    deactivate = copy.deepcopy(skill)
+    deactivate.update(
+        {
+            "operation_id": operation_id,
+            "expected_revision": 1,
+            "activation_receipt": None,
+        }
+    )
+
+    rebuild = {
+        "operation_id": operation_id,
+        "expected_revision": 1,
+        "skill_id": skill["skill_proposal"]["artifact_id"],
+    }
+
+    def bounded(factory):
+        def connect():
+            connection = factory()
+            with connection.cursor() as cursor:
+                cursor.execute("SET lock_timeout = '4s'")
+                cursor.execute("SET statement_timeout = '8s'")
+            return connection
+
+        return connect
+
+    lifecycle_wire = build_skill_lifecycle_wire_command("deactivate", deactivate)
+    rebuild_wire = build_skill_lifecycle_wire_command("rebuild", rebuild)
+
+    def direct_rebuild():
+        with (
+            bounded(postgres_connections["skill_authority"])() as connection,
+            connection.cursor() as cursor,
+        ):
+            cursor.execute(
+                "SELECT gah_rebuild_skill_projection(%s::jsonb, %s::jsonb)",
+                (json.dumps(actor), json.dumps(rebuild_wire)),
+            )
+            return cursor.fetchone()
+
+    def direct_lifecycle_draft_lock():
+        with (
+            bounded(postgres_connections["writer"])() as writer_connection,
+            writer_connection.cursor() as writer_cursor,
+            bounded(postgres_connections["skill_authority"])() as connection,
+            connection.cursor() as cursor,
+        ):
+            authorization = _authorize_lifecycle_writer(writer_cursor, actor, lifecycle_wire)
+            cursor.execute(
+                "SELECT gah_lock_skill_lifecycle_draft(%s::jsonb, %s::jsonb, 'deactivate', %s::jsonb)",
+                (json.dumps(actor), json.dumps(lifecycle_wire), json.dumps(authorization)),
+            )
+            assert cursor.fetchone() == (None,)
+            cursor.execute(
+                "SELECT gah_lookup_skill_replay(%s::jsonb, %s::jsonb)",
+                (json.dumps(actor), json.dumps(lifecycle_wire)),
+            )
+            return cursor.fetchone()
+
+    operation_lock = f"skill-operation:{actor['tenant_id']}:{actor['actor_id']}:{operation_id}"
+    skill_lock = (
+        f"skill:{actor['tenant_id']}:{actor['actor_id']}:{skill['skill_proposal']['artifact_id']}"
+    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        with (
+            postgres_connections["admin"]() as holder_connection,
+            holder_connection.cursor() as holder_cursor,
+        ):
+            holder_cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (operation_lock,),
+            )
+            rebuild_future = pool.submit(direct_rebuild)
+            assert _wait_for_skill_authority_lock(
+                postgres_connections, "gah_rebuild_skill_projection"
+            ), "rebuild did not queue on the operation lock"
+            lifecycle_future = pool.submit(direct_lifecycle_draft_lock)
+            assert _wait_for_skill_authority_lock(
+                postgres_connections, "gah_lock_skill_lifecycle_draft"
+            ), "lifecycle draft did not queue on the operation lock"
+            with (
+                postgres_connections["admin"]() as contender_connection,
+                contender_connection.cursor() as contender_cursor,
+            ):
+                contender_cursor.execute(
+                    "SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (skill_lock,),
+                )
+                assert contender_cursor.fetchone() == (True,)
+
+        outcomes = []
+        for future in (rebuild_future, lifecycle_future):
+            try:
+                outcomes.append(("ok", future.result(timeout=10)))
+            except Exception as error:
+                outcomes.append(("error", error))
+
+    errors = [value for kind, value in outcomes if kind == "error"]
+
+    def diagnostic(error: Exception) -> str:
+        sqlstate = getattr(error, "sqlstate", None) or getattr(error, "pgcode", None)
+        return f"{type(error).__name__}(sqlstate={sqlstate!r}): {error}"
+
+    assert not any(
+        (getattr(error, "sqlstate", None) or getattr(error, "pgcode", None))
+        in {"40P01", "55P03", "57014"}
+        or "deadlock detected" in str(error)
+        or "lock timeout" in str(error)
+        or "statement timeout" in str(error)
+        for error in errors
+    ), [diagnostic(error) for error in errors]
+    assert not errors, [diagnostic(error) for error in errors]
+
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT count(*) FROM gah_skill_projection_rebuilds "
+            "WHERE tenant_id=%s AND actor_id=%s AND operation_id=%s",
+            (actor["tenant_id"], actor["actor_id"], operation_id),
+        )
+        assert cursor.fetchone() == (1,)
 
 
 def test_execution_issuance_takes_skill_lock_before_waiting_on_active_projection(
@@ -1480,6 +2257,217 @@ def test_lock_order_internal_issuer_is_not_an_authority_entrypoint(postgres_conn
         assert cursor.fetchone() == (True, False, False, False)
 
 
+def test_lifecycle_draft_lock_is_lifecycle_authority_only(postgres_connections):
+    actor, skill = _persisted_skill(postgres_connections)
+    wire = build_skill_lifecycle_wire_command(
+        "deactivate",
+        {
+            **skill,
+            "operation_id": "phase5-direct-draft-lock",
+            "expected_revision": 1,
+            "activation_receipt": None,
+        },
+    )
+    function = "gah_lock_skill_lifecycle_draft(jsonb,jsonb,text,jsonb)"
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT "
+            "has_function_privilege('gah_skill_authority', %s, 'EXECUTE'), "
+            "has_function_privilege('gah_app', %s, 'EXECUTE'), "
+            "has_function_privilege('gah_writer', %s, 'EXECUTE'), "
+            "has_function_privilege('gah_execution_authority', %s, 'EXECUTE'), "
+            "has_function_privilege('public', %s, 'EXECUTE'), "
+            "pg_get_userbyid(proowner), proconfig "
+            "FROM pg_proc WHERE oid=%s::regprocedure",
+            (function, function, function, function, function, function),
+        )
+        assert cursor.fetchone() == (
+            True,
+            False,
+            False,
+            False,
+            False,
+            "gah_schema_owner",
+            ["search_path=pg_catalog, public"],
+        )
+
+    with (
+        postgres_connections["writer"]() as writer_connection,
+        writer_connection.cursor() as writer_cursor,
+        postgres_connections["skill_authority"]() as connection,
+        connection.cursor() as cursor,
+    ):
+        authorization = _authorize_lifecycle_writer(writer_cursor, actor, wire)
+        cursor.execute(
+            "SELECT gah_lock_skill_lifecycle_draft(%s::jsonb, %s::jsonb, 'deactivate', %s::jsonb)",
+            (json.dumps(actor), json.dumps(wire), json.dumps(authorization)),
+        )
+        assert cursor.fetchone() == (None,)
+
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        cursor.execute("GRANT gah_runtime TO gah_skill_authority")
+    try:
+        with (
+            postgres_connections["writer"]() as writer_connection,
+            writer_connection.cursor() as writer_cursor,
+            postgres_connections["skill_authority"]() as connection,
+            connection.cursor() as cursor,
+        ):
+            authorization = _authorize_lifecycle_writer(writer_cursor, actor, wire)
+            with pytest.raises(Exception, match="requires lifecycle authority"):
+                cursor.execute(
+                    "SELECT gah_lock_skill_lifecycle_draft(%s::jsonb, %s::jsonb, 'deactivate', %s::jsonb)",
+                    (json.dumps(actor), json.dumps(wire), json.dumps(authorization)),
+                )
+            connection.rollback()
+    finally:
+        with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+            cursor.execute("REVOKE gah_runtime FROM gah_skill_authority")
+
+
+def test_lifecycle_draft_lock_requires_live_full_writer_pair_before_head_mutation(
+    postgres_connections,
+):
+    actor, skill = _persisted_skill(postgres_connections)
+    deactivate = {
+        **skill,
+        "operation_id": "phase5-draft-lock-live-writer",
+        "expected_revision": 1,
+        "activation_receipt": None,
+    }
+    wire = build_skill_lifecycle_wire_command("deactivate", deactivate)
+
+    def counts():
+        with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT (SELECT count(*) FROM gah_run_heads), "
+                "(SELECT count(*) FROM gah_evidence_events), "
+                "(SELECT count(*) FROM gah_skill_lifecycle_transitions)"
+            )
+            return cursor.fetchone()
+
+    def direct(command, authorization):
+        with postgres_connections["skill_authority"]() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT gah_lock_skill_lifecycle_draft(%s::jsonb, %s::jsonb, 'deactivate', %s::jsonb)",
+                (json.dumps(actor), json.dumps(command), json.dumps(authorization)),
+            )
+
+    minimal = {
+        "operation": "deactivate",
+        "operation_id": "phase5-minimal-draft-lock",
+        "skill_proposal": {"artifact_id": skill["skill_proposal"]["artifact_id"]},
+    }
+    minimal["operation_digest"] = sha256_digest(minimal)
+    before = counts()
+    with pytest.raises(Exception, match="command is malformed"):
+        direct(minimal, None)
+    assert counts() == before
+
+    with pytest.raises(Exception, match="writer authorization is invalid"):
+        direct(wire, None)
+    assert counts() == before
+
+    with (
+        postgres_connections["writer"]() as writer_connection,
+        writer_connection.cursor() as writer_cursor,
+    ):
+        authorization = _authorize_lifecycle_writer(writer_cursor, actor, wire)
+        changed = copy.deepcopy(authorization)
+        changed["operation_id"] = "phase5-changed-writer-authorization"
+        with pytest.raises(Exception, match="writer authorization is invalid"):
+            direct(wire, changed)
+    assert counts() == before
+
+    def retarget_session(session_id: str):
+        paired_actor = copy.deepcopy(actor)
+        paired_actor["session_id"] = session_id
+        paired_actor["correlation_id"] = session_id
+        paired_wire = copy.deepcopy(
+            build_skill_lifecycle_wire_command(
+                "install",
+                {**skill, "operation_id": f"phase5-fresh-head-{session_id[-4:]}"},
+            )
+        )
+        scope = copy.deepcopy(paired_wire["skill_proposal"]["target_scope"])
+        scope["parent_digest"] = sha256_digest(paired_actor)
+        paired_wire["skill_proposal"]["target_scope"] = copy.deepcopy(scope)
+        paired_wire["gate_decision"]["target_scope"] = copy.deepcopy(scope)
+        paired_wire["delivery_envelope"]["target_scope"] = copy.deepcopy(scope)
+        paired_wire["operation_digest"] = sha256_digest(
+            {key: value for key, value in paired_wire.items() if key != "operation_digest"}
+        )
+        return paired_actor, paired_wire
+
+    paired_actor, paired_wire = retarget_session("018f0000-0000-7000-8000-00000000f001")
+    before = counts()
+    with pytest.raises(RuntimeError, match="force lifecycle rollback"):
+        with (
+            postgres_connections["writer"]() as writer_connection,
+            writer_connection.cursor() as writer_cursor,
+            postgres_connections["skill_authority"]() as connection,
+            connection.cursor() as cursor,
+        ):
+            authorization = _authorize_lifecycle_writer(writer_cursor, paired_actor, paired_wire)
+            cursor.execute(
+                "SELECT gah_lock_skill_lifecycle_draft(%s::jsonb, %s::jsonb, 'install', %s::jsonb)",
+                (json.dumps(paired_actor), json.dumps(paired_wire), json.dumps(authorization)),
+            )
+            assert cursor.fetchone() == (None,)
+            raise RuntimeError("force lifecycle rollback")
+    assert counts() == before
+
+    committed_actor, committed_wire = retarget_session("018f0000-0000-7000-8000-00000000f003")
+    before = counts()
+    with (
+        postgres_connections["writer"]() as writer_connection,
+        writer_connection.cursor() as writer_cursor,
+        postgres_connections["skill_authority"]() as connection,
+        connection.cursor() as cursor,
+    ):
+        authorization = _authorize_lifecycle_writer(writer_cursor, committed_actor, committed_wire)
+        cursor.execute(
+            "SELECT gah_lock_skill_lifecycle_draft(%s::jsonb, %s::jsonb, 'install', %s::jsonb)",
+            (
+                json.dumps(committed_actor),
+                json.dumps(committed_wire),
+                json.dumps(authorization),
+            ),
+        )
+        assert cursor.fetchone() == (None,)
+    assert counts() == before
+
+    collision_actor, collision_wire = retarget_session("018f0000-0000-7000-8000-00000000f002")
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO gah_run_heads (tenant_id, actor_id, run_id) VALUES (%s, %s, %s)",
+            (
+                collision_actor["tenant_id"],
+                "018f0000-0000-7000-8000-00000000f099",
+                collision_actor["session_id"],
+            ),
+        )
+    before = counts()
+    with (
+        postgres_connections["writer"]() as writer_connection,
+        writer_connection.cursor() as writer_cursor,
+        postgres_connections["skill_authority"]() as connection,
+        connection.cursor() as cursor,
+    ):
+        authorization = _authorize_lifecycle_writer(writer_cursor, collision_actor, collision_wire)
+        with pytest.raises(Exception, match="run scope conflicts with an existing actor"):
+            cursor.execute(
+                "SELECT gah_lock_skill_lifecycle_draft(%s::jsonb, %s::jsonb, 'install', %s::jsonb)",
+                (
+                    json.dumps(collision_actor),
+                    json.dumps(collision_wire),
+                    json.dumps(authorization),
+                ),
+            )
+        connection.rollback()
+    assert counts() == before
+
+
 def test_concurrent_consume_has_one_handler_winner(postgres_connections):
     actor, skill = _persisted_skill(postgres_connections)
     authorization = _authority(postgres_connections).issue(
@@ -1545,14 +2533,15 @@ def test_concurrent_exact_issue_converges_on_one_authorization(postgres_connecti
 
 
 def test_grant_expiry_is_capped_by_retention(postgres_connections):
-    retention_expiry = NOW + timedelta(seconds=45)
+    now = datetime.now(timezone.utc)
+    retention_expiry = now + timedelta(seconds=45)
     actor, skill = _persisted_skill(
         postgres_connections,
         retention_expires_at=_ts(retention_expiry),
     )
     command = _execution_command(actor, skill)
 
-    authorization = _authority(postgres_connections).issue(
+    authorization = _authority(postgres_connections, now=now).issue(
         actor_context=actor,
         command=command,
     )
@@ -1646,6 +2635,21 @@ def test_direct_sql_rejects_tampered_signed_approval_proof_with_live_writer(
             actor=actor,
             skill=skill,
             proof_field=proof_field,
+        )
+
+    assert _snapshot(postgres_connections) == before
+
+
+def test_direct_sql_rejects_revoked_approval_with_live_writer(postgres_connections):
+    actor, skill = _persisted_skill(postgres_connections)
+    before = _snapshot(postgres_connections)
+
+    with pytest.raises(Exception, match="approval is revoked"):
+        _direct_issue_with_live_writer_and_tampered_approval(
+            postgres_connections,
+            actor=actor,
+            skill=skill,
+            proof_field="revoked_at",
         )
 
     assert _snapshot(postgres_connections) == before

@@ -115,7 +115,13 @@ def postgres_connections(postgres_server: dict[str, str], tmp_path: Path):
         bytes.fromhex("2f4b0b6f0906b7c5e3f0a25e7c5c9ddbcf8d175b75a5a09b2a1dc38841f47c72")
     ).verify_key.encode()
     with psycopg.connect(**admin_values) as connection, connection.cursor() as cursor:
-        for proof_domain in ("approval_record.v1", "authorization_grant.v1"):
+        proof_bindings = (
+            ("policy.authority", "policy.key.v1", "approval_record.v1"),
+            ("policy.authority", "policy.key.v1", "authorization_grant.v1"),
+            ("runtime.authority", "runtime.key.v1", "activation_receipt.v1"),
+            ("runtime.authority", "runtime.key.v1", "rollback_receipt.v1"),
+        )
+        for issuer, key_id, proof_domain in proof_bindings:
             cursor.execute(
                 "INSERT INTO gah_execution_proof_keys ("
                 "issuer,key_id,algorithm,proof_domain,public_key,public_key_fingerprint,"
@@ -123,8 +129,8 @@ def postgres_connections(postgres_server: dict[str, str], tmp_path: Path):
                 ") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::timestamptz,%s::timestamptz) "
                 "ON CONFLICT DO NOTHING",
                 (
-                    "policy.authority",
-                    "policy.key.v1",
+                    issuer,
+                    key_id,
                     "ed25519-rfc8032-gah-cjson-v1",
                     proof_domain,
                     test_public_key,

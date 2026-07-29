@@ -361,6 +361,16 @@ class PostgresSkillLifecycleAuthority:
                     "writer_authorization": authorization,
                 }
                 with self._privileged_connect() as connection, connection.cursor() as cursor:
+                    # One transaction holds operation -> actor/skill -> run-head
+                    # across replay lookup, evidence drafting, and lifecycle
+                    # apply. This matches rebuild order and closes stale-head
+                    # races with execution issuance and generic evidence writers.
+                    cursor.execute(
+                        "SELECT gah_lock_skill_lifecycle_draft(%s::jsonb, %s::jsonb, %s, %s::jsonb)",
+                        (_json(actor_context), _json(wire), operation, _json(authorization)),
+                    )
+                    if cursor.fetchone() != (None,):
+                        raise RuntimeError("skill lifecycle draft lock is unavailable")
                     cursor.execute(
                         "SELECT gah_lookup_skill_replay(%s::jsonb, %s::jsonb)",
                         (_json(actor_context), _json(wire)),

@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import copy
+import base64
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import json
+from threading import Barrier
+from uuid import uuid4
 
 import pytest
+from nacl.signing import SigningKey
 
 from governed_agent_harness.contracts import (
     TrustContext,
     TrustedKey,
     apply_object_digest,
+    canonical_bytes,
     sha256_digest,
 )
 from governed_agent_harness.contracts.positive_fixtures import build_positive_records
@@ -25,6 +31,38 @@ from skill_lifecycle_support import command as build_command, ref
 
 NOW = datetime(2026, 1, 1, 0, 12, tzinfo=timezone.utc)
 RECEIPT_NOW = datetime(2026, 1, 1, 0, 30, tzinfo=timezone.utc)
+_TEST_SIGNING_SEED = bytes.fromhex(
+    "2f4b0b6f0906b7c5e3f0a25e7c5c9ddbcf8d175b75a5a09b2a1dc38841f47c72"
+)
+_TEST_ALGORITHM = "ed25519-rfc8032-gah-cjson-v1"
+
+
+def _sign_runtime_receipt(receipt):
+    signed = copy.deepcopy(receipt)
+    unsigned = copy.deepcopy(signed)
+    unsigned.pop("proof", None)
+    unsigned.pop("receipt_digest", None)
+    object_digest = sha256_digest(unsigned)
+    proof = {
+        "issuer": "runtime.authority",
+        "key_id": "runtime.key.v1",
+        "algorithm": _TEST_ALGORITHM,
+        "proof_domain": "activation_receipt.v1",
+        "object_digest": object_digest,
+        "nonce": "A" * 22,
+    }
+    frame = canonical_bytes(
+        {
+            "protocol": "gah.detached-proof.v1",
+            **proof,
+            "unsigned_record": unsigned,
+        }
+    )
+    signature = SigningKey(_TEST_SIGNING_SEED).sign(frame).signature
+    proof["detached_proof"] = base64.urlsafe_b64encode(signature).rstrip(b"=").decode("ascii")
+    signed["receipt_digest"] = object_digest
+    signed["proof"] = proof
+    return signed
 
 
 def _ids():
@@ -50,12 +88,12 @@ def _receipt_trust(now: datetime) -> TrustContext:
             TrustedKey(
                 issuer="runtime.authority",
                 key_id="runtime.key.v1",
-                algorithms=frozenset({"fixture-proof-v1"}),
+                algorithms=frozenset({_TEST_ALGORITHM}),
                 valid_from=now - timedelta(days=1),
                 valid_until=now + timedelta(days=1),
             ),
         ),
-        allowed_algorithms=frozenset({"fixture-proof-v1"}),
+        allowed_algorithms=frozenset({_TEST_ALGORITHM}),
         allowed_proof_domains=frozenset({"activation_receipt.v1"}),
         expected_issuers=frozenset({"runtime.authority"}),
         allowed_domain_issuers=frozenset({("activation_receipt.v1", "runtime.authority")}),
@@ -68,6 +106,7 @@ def _actor_and_command(
     *,
     actor_id: str | None = None,
     session_id: str | None = None,
+    source_run_id: str | None = None,
     provision: bool = False,
 ):
     actor, command = build_command()
@@ -88,7 +127,7 @@ def _actor_and_command(
         _provision_second_actor(postgres_connections, actor)
     source = postgres_connections["store_at"](NOW).append(
         tenant_id=actor["tenant_id"],
-        run_id=f"{actor['session_id'][:-1]}f",
+        run_id=source_run_id or f"{actor['session_id'][:-1]}f",
         event_kind="kernel.policy_decided",
         policy_ref={
             "record_type": "policy_decision",
@@ -129,6 +168,7 @@ def _actor_and_command(
 
 def _activation_receipt(command):
     receipt = copy.deepcopy(build_positive_records()["activation_receipt"])
+    receipt["expires_at"] = "2030-01-01T00:00:00.000Z"
     delivery = command["delivery_envelope"]
     proposal = command["skill_proposal"]
     receipt.update(
@@ -148,7 +188,8 @@ def _activation_receipt(command):
             "reviewer_refs": copy.deepcopy(delivery["reviewer_refs"]),
         }
     )
-    return apply_object_digest(receipt)
+    apply_object_digest(receipt)
+    return _sign_runtime_receipt(receipt)
 
 
 def _authority(postgres_connections):
@@ -235,6 +276,154 @@ def test_same_tenant_actors_independently_activate_fixed_builtin_skill(postgres_
             (actor_a["actor_id"], "active"),
             (actor_b["actor_id"], "active"),
         ]
+
+
+def test_concurrent_fresh_same_tenant_run_collision_has_one_actor_winner(
+    postgres_connections,
+):
+    import psycopg
+    from psycopg import sql
+
+    shared_run = "018f0000-0000-7000-8000-0000000000e0"
+    actor_a, install_a = _actor_and_command(
+        postgres_connections,
+        session_id=shared_run,
+        source_run_id="018f0000-0000-7000-8000-0000000000e1",
+    )
+    actor_b, install_b = _actor_and_command(
+        postgres_connections,
+        actor_id="018f0000-0000-7000-8000-0000000000a2",
+        session_id=shared_run,
+        source_run_id="018f0000-0000-7000-8000-0000000000e2",
+        provision=True,
+    )
+    install_a["operation_id"] = "fresh-run-collision-a"
+    install_b["operation_id"] = "fresh-run-collision-b"
+    with postgres_connections["admin"]() as connection:
+        parameters = connection.info.get_parameters()
+    suffix = uuid4().hex[:10]
+    roles = {
+        "writer_a": f"gah_collision_writer_a_{suffix}",
+        "skill_a": f"gah_collision_skill_a_{suffix}",
+        "writer_b": f"gah_collision_writer_b_{suffix}",
+        "skill_b": f"gah_collision_skill_b_{suffix}",
+    }
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        for role in roles.values():
+            cursor.execute(
+                sql.SQL("CREATE ROLE {} LOGIN NOSUPERUSER NOBYPASSRLS INHERIT").format(
+                    sql.Identifier(role)
+                )
+            )
+        for role_key, base_role in (
+            ("writer_a", "gah_authority_writer"),
+            ("skill_a", "gah_skill_lifecycle_authority"),
+            ("writer_b", "gah_authority_writer"),
+            ("skill_b", "gah_skill_lifecycle_authority"),
+        ):
+            cursor.execute(
+                sql.SQL("GRANT {} TO {}").format(
+                    sql.Identifier(base_role), sql.Identifier(roles[role_key])
+                )
+            )
+    for actor, role_keys in (
+        (actor_a, ("writer_a", "skill_a")),
+        (actor_b, ("writer_b", "skill_b")),
+    ):
+        PostgresDurableEffectStore.provision_principal(
+            admin_connect=postgres_connections["admin"],
+            database_roles=tuple(roles[key] for key in role_keys),
+            actor_context=actor,
+        )
+
+    def role_connect(role: str):
+        return psycopg.connect(**{**parameters, "user": role})
+
+    barrier = Barrier(2)
+
+    def install(actor, command, writer_role, skill_role):
+        barrier.wait(timeout=5)
+        try:
+            result = PostgresSkillLifecycleAuthority(
+                privileged_connect=lambda: role_connect(skill_role),
+                evidence_writer_connect=lambda: role_connect(writer_role),
+                clock=lambda: RECEIPT_NOW,
+                ids=_ids(),
+            ).install_skill(actor_context=actor, **command)
+            return ("ok", result)
+        except Exception as error:
+            return ("error", str(error))
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = [
+                future.result(timeout=8)
+                for future in (
+                    pool.submit(
+                        install,
+                        actor_a,
+                        install_a,
+                        roles["writer_a"],
+                        roles["skill_a"],
+                    ),
+                    pool.submit(
+                        install,
+                        actor_b,
+                        install_b,
+                        roles["writer_b"],
+                        roles["skill_b"],
+                    ),
+                )
+            ]
+        assert sum(status == "ok" for status, _value in results) == 1
+        errors = [value for status, value in results if status == "error"]
+        assert len(errors) == 1
+        assert "run scope conflicts with an existing actor" in errors[0]
+        with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT "
+                "(SELECT count(*) FROM gah_run_heads "
+                " WHERE tenant_id=%s AND run_id=%s),"
+                "(SELECT count(*) FROM gah_evidence_events "
+                " WHERE tenant_id=%s AND run_id=%s "
+                " AND envelope_json#>>'{draft,event_kind}'='skill.lifecycle_transition'),"
+                "(SELECT count(*) FROM gah_skill_lifecycle_transitions "
+                " WHERE tenant_id=%s AND operation_id IN (%s,%s)),"
+                "(SELECT count(*) FROM gah_skill_artifact_revisions "
+                " WHERE tenant_id=%s AND actor_id IN (%s,%s))",
+                (
+                    actor_a["tenant_id"],
+                    shared_run,
+                    actor_a["tenant_id"],
+                    shared_run,
+                    actor_a["tenant_id"],
+                    install_a["operation_id"],
+                    install_b["operation_id"],
+                    actor_a["tenant_id"],
+                    actor_a["actor_id"],
+                    actor_b["actor_id"],
+                ),
+            )
+            assert cursor.fetchone() == (1, 1, 1, 1)
+    finally:
+        with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM gah_runtime_principals WHERE database_role=ANY(%s)",
+                (list(roles.values()),),
+            )
+            for role_key, base_role in (
+                ("writer_a", "gah_authority_writer"),
+                ("skill_a", "gah_skill_lifecycle_authority"),
+                ("writer_b", "gah_authority_writer"),
+                ("skill_b", "gah_skill_lifecycle_authority"),
+            ):
+                cursor.execute(
+                    sql.SQL("REVOKE {} FROM {}").format(
+                        sql.Identifier(base_role), sql.Identifier(roles[role_key])
+                    )
+                )
+            for role in roles.values():
+                cursor.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
 
 
 def test_generic_writer_cannot_poison_lifecycle_evidence_but_specialized_sink_can(

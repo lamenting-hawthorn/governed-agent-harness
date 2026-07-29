@@ -4,17 +4,22 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import base64
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 import json
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
+import time
 
 import pytest
+from nacl.signing import SigningKey
 
 from governed_agent_harness.contracts import (
     TrustContext,
     TrustedKey,
     apply_object_digest,
+    canonical_bytes,
     sha256_digest,
     verify_runtime_receipt,
 )
@@ -30,6 +35,44 @@ from skill_lifecycle_support import command as build_command, ref
 
 NOW = datetime(2026, 1, 1, 0, 12, tzinfo=timezone.utc)
 RECEIPT_NOW = datetime(2026, 1, 1, 0, 30, tzinfo=timezone.utc)
+_TEST_SIGNING_SEED = bytes.fromhex(
+    "2f4b0b6f0906b7c5e3f0a25e7c5c9ddbcf8d175b75a5a09b2a1dc38841f47c72"
+)
+_TEST_ALGORITHM = "ed25519-rfc8032-gah-cjson-v1"
+
+
+def _sign_runtime_receipt(
+    receipt, *, proof_domain: str, nonce: str, key_id: str = "runtime.key.v1"
+):
+    signed = copy.deepcopy(receipt)
+    unsigned = copy.deepcopy(signed)
+    unsigned.pop("proof", None)
+    unsigned.pop("receipt_digest", None)
+    object_digest = sha256_digest(unsigned)
+    frame = canonical_bytes(
+        {
+            "protocol": "gah.detached-proof.v1",
+            "issuer": "runtime.authority",
+            "key_id": key_id,
+            "algorithm": _TEST_ALGORITHM,
+            "proof_domain": proof_domain,
+            "object_digest": object_digest,
+            "nonce": nonce,
+            "unsigned_record": unsigned,
+        }
+    )
+    signature = SigningKey(_TEST_SIGNING_SEED).sign(frame).signature
+    signed["receipt_digest"] = object_digest
+    signed["proof"] = {
+        "issuer": "runtime.authority",
+        "key_id": key_id,
+        "algorithm": _TEST_ALGORITHM,
+        "proof_domain": proof_domain,
+        "object_digest": object_digest,
+        "nonce": nonce,
+        "detached_proof": base64.urlsafe_b64encode(signature).rstrip(b"=").decode("ascii"),
+    }
+    return signed
 
 
 def _ids():
@@ -176,12 +219,12 @@ def _receipt_trust(now: datetime) -> TrustContext:
             TrustedKey(
                 issuer="runtime.authority",
                 key_id="runtime.key.v1",
-                algorithms=frozenset({"fixture-proof-v1"}),
+                algorithms=frozenset({_TEST_ALGORITHM}),
                 valid_from=now - timedelta(days=1),
                 valid_until=now + timedelta(days=1),
             ),
         ),
-        allowed_algorithms=frozenset({"fixture-proof-v1"}),
+        allowed_algorithms=frozenset({_TEST_ALGORITHM}),
         allowed_proof_domains=frozenset({"activation_receipt.v1", "rollback_receipt.v1"}),
         expected_issuers=frozenset({"runtime.authority"}),
         allowed_domain_issuers=frozenset(
@@ -216,6 +259,7 @@ def _approval_trust(now: datetime) -> TrustContext:
 
 def _activation_receipt(command):
     receipt = copy.deepcopy(build_positive_records()["activation_receipt"])
+    receipt["expires_at"] = "2030-01-01T00:00:00.000Z"
     delivery = command["delivery_envelope"]
     proposal = command["skill_proposal"]
     receipt.update(
@@ -235,11 +279,13 @@ def _activation_receipt(command):
             "reviewer_refs": copy.deepcopy(delivery["reviewer_refs"]),
         }
     )
-    return apply_object_digest(receipt)
+    apply_object_digest(receipt)
+    return _sign_runtime_receipt(receipt, proof_domain="activation_receipt.v1", nonce="A" * 22)
 
 
 def _rollback_receipt(command, activation):
     receipt = copy.deepcopy(build_positive_records()["rollback_receipt"])
+    receipt["expires_at"] = "2030-01-01T00:00:00.000Z"
     delivery = command["delivery_envelope"]
     proposal = command["skill_proposal"]
     receipt.update(
@@ -263,7 +309,8 @@ def _rollback_receipt(command, activation):
             "reviewer_refs": copy.deepcopy(delivery["reviewer_refs"]),
         }
     )
-    return apply_object_digest(receipt)
+    apply_object_digest(receipt)
+    return _sign_runtime_receipt(receipt, proof_domain="rollback_receipt.v1", nonce="R" * 22)
 
 
 def _rollback_receipt_trust(now, activation, rollback):
@@ -338,6 +385,7 @@ def test_exact_lifecycle_replay_precedes_current_validity_validation(postgres_co
     receipt = _activation_receipt(install)
     receipt["expires_at"] = "2027-01-01T00:00:00.000Z"
     apply_object_digest(receipt)
+    receipt = _sign_runtime_receipt(receipt, proof_domain="activation_receipt.v1", nonce="E" * 22)
     activate = copy.deepcopy(install)
     activate.update(
         {
@@ -1644,6 +1692,169 @@ def test_direct_rebuild_sql_rejects_changed_digest_before_replay_or_mutation(pos
         assert cursor.fetchone()[0] == 1
 
 
+def test_rebuild_rejects_poisoned_historical_receipt_before_projection_mutation(
+    postgres_connections,
+):
+    actor, install = _persisted_command(postgres_connections)
+    authority = PostgresSkillLifecycleAuthority(
+        privileged_connect=postgres_connections["skill_authority"],
+        evidence_writer_connect=postgres_connections["writer"],
+        clock=lambda: RECEIPT_NOW,
+        ids=_ids(),
+        receipt_verifier=_AcceptingVerifier(),
+        receipt_trust=_receipt_trust,
+    )
+    authority.install_skill(actor_context=actor, **install)
+    activate = copy.deepcopy(install)
+    activate.update(
+        {
+            "operation_id": "rebuild-poisoned-receipt-activate",
+            "expected_revision": 1,
+            "activation_receipt": _activation_receipt(install),
+        }
+    )
+    active = authority.activate_skill(actor_context=actor, **activate)
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE gah_skill_lifecycle_transitions "
+            "SET command_json=jsonb_set(command_json,"
+            "'{activation_receipt,proof,detached_proof}','\"" + "A" * 86 + "\"'::jsonb) "
+            "WHERE tenant_id=%s AND actor_id=%s AND skill_id=%s AND operation='activate'",
+            (actor["tenant_id"], actor["actor_id"], active.skill_id),
+        )
+        cursor.execute(
+            "DELETE FROM gah_active_skill_projection "
+            "WHERE tenant_id=%s AND actor_id=%s AND skill_id=%s",
+            (actor["tenant_id"], actor["actor_id"], active.skill_id),
+        )
+        cursor.execute(
+            "SELECT count(*) FROM gah_skill_projection_rebuilds WHERE tenant_id=%s AND actor_id=%s",
+            (actor["tenant_id"], actor["actor_id"]),
+        )
+        rebuilds_before = cursor.fetchone()[0]
+
+    with pytest.raises(Exception, match="detached proof verification failed"):
+        authority.rebuild_skill_projection(
+            actor_context=actor,
+            operation_id="rebuild-poisoned-receipt",
+            expected_revision=1,
+            skill_id=active.skill_id,
+        )
+
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT "
+            "(SELECT count(*) FROM gah_active_skill_projection "
+            " WHERE tenant_id=%s AND actor_id=%s AND skill_id=%s),"
+            "(SELECT count(*) FROM gah_skill_projection_rebuilds "
+            " WHERE tenant_id=%s AND actor_id=%s)",
+            (
+                actor["tenant_id"],
+                actor["actor_id"],
+                active.skill_id,
+                actor["tenant_id"],
+                actor["actor_id"],
+            ),
+        )
+        assert cursor.fetchone() == (0, rebuilds_before)
+
+
+def test_rebuild_rejects_coherent_receipt_delivery_but_cross_bound_proposal(
+    postgres_connections,
+):
+    actor, install = _persisted_command(postgres_connections)
+    authority = PostgresSkillLifecycleAuthority(
+        privileged_connect=postgres_connections["skill_authority"],
+        evidence_writer_connect=postgres_connections["writer"],
+        clock=lambda: RECEIPT_NOW,
+        ids=_ids(),
+        receipt_verifier=_AcceptingVerifier(),
+        receipt_trust=_receipt_trust,
+    )
+    authority.install_skill(actor_context=actor, **install)
+    activate = copy.deepcopy(install)
+    activate.update(
+        {
+            "operation_id": "rebuild-cross-bound-proposal-activate",
+            "expected_revision": 1,
+            "activation_receipt": _activation_receipt(install),
+        }
+    )
+    active = authority.activate_skill(actor_context=actor, **activate)
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT command_json FROM gah_skill_lifecycle_transitions "
+            "WHERE tenant_id=%s AND actor_id=%s AND skill_id=%s AND operation='activate'",
+            (actor["tenant_id"], actor["actor_id"], active.skill_id),
+        )
+        poisoned = cursor.fetchone()[0]
+        foreign_artifact_id = "018f0000-0000-7000-8000-0000000000fd"
+        poisoned["delivery_envelope"]["artifact_id"] = foreign_artifact_id
+        receipt = copy.deepcopy(poisoned["activation_receipt"])
+        receipt["artifact_id"] = foreign_artifact_id
+        poisoned["activation_receipt"] = _sign_runtime_receipt(
+            receipt,
+            proof_domain="activation_receipt.v1",
+            nonce="D" * 22,
+        )
+        cursor.execute(
+            "ALTER TABLE gah_skill_lifecycle_transitions "
+            "DROP CONSTRAINT gah_skill_transition_command_sink_guard"
+        )
+        cursor.execute(
+            "UPDATE gah_skill_lifecycle_transitions SET command_json=%s::jsonb "
+            "WHERE tenant_id=%s AND actor_id=%s AND skill_id=%s AND operation='activate'",
+            (
+                json.dumps(poisoned),
+                actor["tenant_id"],
+                actor["actor_id"],
+                active.skill_id,
+            ),
+        )
+        cursor.execute(
+            "ALTER TABLE gah_skill_lifecycle_transitions "
+            "ADD CONSTRAINT gah_skill_transition_command_sink_guard "
+            "CHECK (gah_skill_lifecycle_sink_command_valid("
+            "tenant_id,actor_id,skill_id,target_revision,"
+            "command_json #>> '{delivery_envelope,artifact_digest}',command_json) IS TRUE) "
+            "NOT VALID"
+        )
+        cursor.execute(
+            "DELETE FROM gah_active_skill_projection "
+            "WHERE tenant_id=%s AND actor_id=%s AND skill_id=%s",
+            (actor["tenant_id"], actor["actor_id"], active.skill_id),
+        )
+        cursor.execute(
+            "SELECT count(*) FROM gah_skill_projection_rebuilds WHERE tenant_id=%s AND actor_id=%s",
+            (actor["tenant_id"], actor["actor_id"]),
+        )
+        rebuilds_before = cursor.fetchone()[0]
+
+    with pytest.raises(Exception, match="lifecycle proposal and delivery composition is invalid"):
+        authority.rebuild_skill_projection(
+            actor_context=actor,
+            operation_id="rebuild-cross-bound-proposal",
+            expected_revision=1,
+            skill_id=active.skill_id,
+        )
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT "
+            "(SELECT count(*) FROM gah_active_skill_projection "
+            " WHERE tenant_id=%s AND actor_id=%s AND skill_id=%s),"
+            "(SELECT count(*) FROM gah_skill_projection_rebuilds "
+            " WHERE tenant_id=%s AND actor_id=%s)",
+            (
+                actor["tenant_id"],
+                actor["actor_id"],
+                active.skill_id,
+                actor["tenant_id"],
+                actor["actor_id"],
+            ),
+        )
+        assert cursor.fetchone() == (0, rebuilds_before)
+
+
 def test_direct_lifecycle_sql_rejects_tampered_transition_envelope_without_mutation(
     postgres_connections,
 ):
@@ -1664,6 +1875,27 @@ def test_direct_lifecycle_sql_rejects_tampered_transition_envelope_without_mutat
             "(SELECT count(*) FROM gah_active_skill_projection)"
         )
         assert cursor.fetchone() == (1, 0, 0)
+
+
+def test_draft_lock_rejects_missing_nested_artifact_digest_without_mutation(
+    postgres_connections,
+):
+    actor, command = _persisted_command(postgres_connections)
+    wire = build_skill_lifecycle_wire_command("install", command)
+    wire["delivery_envelope"].pop("artifact_digest")
+    unsigned = copy.deepcopy(wire)
+    unsigned.pop("operation_digest")
+    wire["operation_digest"] = sha256_digest(unsigned)
+    before = _skill_authority_snapshot(postgres_connections)
+
+    with postgres_connections["skill_authority"]() as connection, connection.cursor() as cursor:
+        with pytest.raises(Exception, match="lifecycle evidence draft lock binding is invalid"):
+            cursor.execute(
+                "SELECT gah_lock_skill_lifecycle_draft(%s::jsonb,%s::jsonb,'install','{}'::jsonb)",
+                (json.dumps(actor), json.dumps(wire)),
+            )
+
+    assert _skill_authority_snapshot(postgres_connections) == before
 
 
 def test_direct_lifecycle_sql_rejects_tampered_runtime_receipt_digest_without_mutation(
@@ -1696,7 +1928,7 @@ def test_direct_lifecycle_sql_rejects_tampered_runtime_receipt_digest_without_mu
     unsigned.pop("operation_digest")
     wire["operation_digest"] = sha256_digest(unsigned)
     with postgres_connections["skill_authority"]() as connection, connection.cursor() as cursor:
-        with pytest.raises(Exception, match="record digest binding is invalid"):
+        with pytest.raises(Exception, match="activation receipt is missing or untrusted"):
             cursor.execute(
                 "SELECT gah_activate_skill(%s::jsonb, %s::jsonb)",
                 (json.dumps(actor), json.dumps(wire)),
@@ -1709,6 +1941,475 @@ def test_direct_lifecycle_sql_rejects_tampered_runtime_receipt_digest_without_mu
             "(SELECT count(*) FROM gah_active_skill_projection)"
         )
         assert cursor.fetchone() == (2, 1, 0)
+
+
+@pytest.mark.parametrize(
+    "attack",
+    ("bogus_signature", "missing_signature", "unknown_key", "unknown_domain"),
+)
+def test_direct_sql_rejects_rehashed_but_untrusted_activation_receipt(postgres_connections, attack):
+    actor, install = _persisted_command(postgres_connections)
+    authority = PostgresSkillLifecycleAuthority(
+        privileged_connect=postgres_connections["skill_authority"],
+        evidence_writer_connect=postgres_connections["writer"],
+        clock=lambda: RECEIPT_NOW,
+        ids=_ids(),
+        receipt_verifier=_AcceptingVerifier(),
+        receipt_trust=_receipt_trust,
+    )
+    authority.install_skill(actor_context=actor, **install)
+    receipt = _activation_receipt(install)
+    receipt["expires_at"] = "2027-01-02T00:00:00.000Z"
+    apply_object_digest(receipt)
+    receipt["proof"]["object_digest"] = receipt["receipt_digest"]
+    receipt["proof"]["detached_proof"] = "A" * 86
+    activate = copy.deepcopy(install)
+    activate.update(
+        {
+            "operation_id": f"receipt-forgery-{attack}",
+            "expected_revision": 1,
+            "activation_receipt": receipt,
+        }
+    )
+    wire = _direct_lifecycle_wire(
+        postgres_connections, actor, activate, "activate", now=RECEIPT_NOW
+    )
+    proof = wire["activation_receipt"]["proof"]
+    if attack == "missing_signature":
+        proof.pop("detached_proof")
+    elif attack == "unknown_key":
+        proof["key_id"] = "runtime.unknown.v1"
+    elif attack == "unknown_domain":
+        proof["proof_domain"] = "activation_receipt.unknown"
+    unsigned = dict(wire)
+    unsigned.pop("transition_evidence")
+    unsigned.pop("operation_digest")
+    wire["operation_digest"] = sha256_digest(unsigned)
+    before = _skill_authority_snapshot(postgres_connections)
+    expected = (
+        "activation receipt is missing or untrusted"
+        if attack in {"missing_signature", "unknown_domain"}
+        else "detached proof verification failed"
+    )
+    with postgres_connections["skill_authority"]() as connection, connection.cursor() as cursor:
+        with pytest.raises(Exception, match=expected):
+            cursor.execute(
+                "SELECT gah_activate_skill(%s::jsonb, %s::jsonb)",
+                (json.dumps(actor), json.dumps(wire)),
+            )
+    assert _skill_authority_snapshot(postgres_connections) == before
+
+
+def test_direct_sql_rejects_backdated_activation_with_currently_expired_key(
+    postgres_connections,
+):
+    actor, install = _persisted_command(postgres_connections)
+    authority = PostgresSkillLifecycleAuthority(
+        privileged_connect=postgres_connections["skill_authority"],
+        evidence_writer_connect=postgres_connections["writer"],
+        clock=lambda: RECEIPT_NOW,
+        ids=_ids(),
+    )
+    authority.install_skill(actor_context=actor, **install)
+    expired_key_id = "runtime.expired.v1"
+    public_key = SigningKey(_TEST_SIGNING_SEED).verify_key.encode()
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO gah_execution_proof_keys ("
+            "issuer,key_id,algorithm,proof_domain,public_key,public_key_fingerprint,"
+            "trust_policy_version,trust_policy_digest,valid_from,valid_until) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::timestamptz,%s::timestamptz)",
+            (
+                "runtime.authority",
+                expired_key_id,
+                _TEST_ALGORITHM,
+                "activation_receipt.v1",
+                public_key,
+                "sha256:" + sha256(public_key).hexdigest(),
+                "phase5.1.expired-key.test.v1",
+                "sha256:" + "2" * 64,
+                "2025-01-01T00:00:00.000Z",
+                "2026-02-01T00:00:00.000Z",
+            ),
+        )
+    receipt = _activation_receipt(install)
+    receipt["issued_at"] = "2026-01-01T00:24:00.000Z"
+    receipt["expires_at"] = "2026-01-31T00:00:00.000Z"
+    receipt = _sign_runtime_receipt(
+        receipt,
+        proof_domain="activation_receipt.v1",
+        nonce="X" * 22,
+        key_id=expired_key_id,
+    )
+    activate = copy.deepcopy(install)
+    activate.update(
+        {
+            "operation_id": "backdated-expired-key-activation",
+            "expected_revision": 1,
+            "activation_receipt": receipt,
+        }
+    )
+    with postgres_connections["writer"]() as writer_connection:
+        authorization = _authorize_lifecycle(writer_connection, actor, "activate", activate)
+        wire = _direct_lifecycle_wire(
+            postgres_connections,
+            actor,
+            activate,
+            "activate",
+            now=RECEIPT_NOW,
+            writer_authorization=authorization,
+        )
+        before = _skill_authority_snapshot(postgres_connections)
+        with (
+            postgres_connections["skill_authority"]() as connection,
+            connection.cursor() as cursor,
+        ):
+            with pytest.raises(Exception, match="detached proof verification failed"):
+                cursor.execute(
+                    "SELECT gah_activate_skill(%s::jsonb, %s::jsonb)",
+                    (json.dumps(actor), json.dumps(wire)),
+                )
+    assert _skill_authority_snapshot(postgres_connections) == before
+
+
+def test_direct_sql_rejects_transition_evidence_before_receipt_issuance(
+    postgres_connections,
+):
+    actor, install = _persisted_command(postgres_connections)
+    PostgresSkillLifecycleAuthority(
+        privileged_connect=postgres_connections["skill_authority"],
+        evidence_writer_connect=postgres_connections["writer"],
+        clock=lambda: NOW,
+        ids=_ids(),
+    ).install_skill(actor_context=actor, **install)
+    activate = copy.deepcopy(install)
+    activate.update(
+        {
+            "operation_id": "backdated-before-receipt-activation",
+            "expected_revision": 1,
+            "activation_receipt": _activation_receipt(install),
+        }
+    )
+    evidence_time = datetime(2026, 1, 1, 0, 23, 30, tzinfo=timezone.utc)
+    with postgres_connections["writer"]() as writer_connection:
+        authorization = _authorize_lifecycle(writer_connection, actor, "activate", activate)
+        wire = _direct_lifecycle_wire(
+            postgres_connections,
+            actor,
+            activate,
+            "activate",
+            now=evidence_time,
+            writer_authorization=authorization,
+        )
+        before = _skill_authority_snapshot(postgres_connections)
+        with (
+            postgres_connections["skill_authority"]() as connection,
+            connection.cursor() as cursor,
+        ):
+            with pytest.raises(Exception, match="detached proof verification failed"):
+                cursor.execute(
+                    "SELECT gah_activate_skill(%s::jsonb,%s::jsonb)",
+                    (json.dumps(actor), json.dumps(wire)),
+                )
+    assert _skill_authority_snapshot(postgres_connections) == before
+
+
+def test_direct_sql_accepted_activation_is_immediately_rebuild_compatible(
+    postgres_connections,
+):
+    actor, install = _persisted_command(postgres_connections)
+    authority = PostgresSkillLifecycleAuthority(
+        privileged_connect=postgres_connections["skill_authority"],
+        evidence_writer_connect=postgres_connections["writer"],
+        clock=lambda: RECEIPT_NOW,
+        ids=_ids(),
+    )
+    authority.install_skill(actor_context=actor, **install)
+    activate = copy.deepcopy(install)
+    activate.update(
+        {
+            "operation_id": "direct-rebuild-compatible-activation",
+            "expected_revision": 1,
+            "activation_receipt": _activation_receipt(install),
+        }
+    )
+    with postgres_connections["writer"]() as writer_connection:
+        authorization = _authorize_lifecycle(writer_connection, actor, "activate", activate)
+        wire = _direct_lifecycle_wire(
+            postgres_connections,
+            actor,
+            activate,
+            "activate",
+            now=RECEIPT_NOW,
+            writer_authorization=authorization,
+        )
+        with (
+            postgres_connections["skill_authority"]() as connection,
+            connection.cursor() as cursor,
+        ):
+            cursor.execute(
+                "SELECT gah_activate_skill(%s::jsonb,%s::jsonb)",
+                (json.dumps(actor), json.dumps(wire)),
+            )
+            activated = cursor.fetchone()[0]
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "DELETE FROM gah_active_skill_projection "
+            "WHERE tenant_id=%s AND actor_id=%s AND skill_id=%s",
+            (actor["tenant_id"], actor["actor_id"], activated["skill_id"]),
+        )
+    rebuilt = authority.rebuild_skill_projection(
+        actor_context=actor,
+        operation_id="direct-rebuild-compatible-replay",
+        expected_revision=1,
+        skill_id=activated["skill_id"],
+    )
+    assert rebuilt.lifecycle_state.value == "active"
+    assert rebuilt.artifact_digest == activated["artifact_digest"]
+
+
+@pytest.mark.parametrize("attack", ("foreign_actor", "foreign_artifact", "foreign_delivery"))
+def test_direct_sql_rejects_valid_signed_receipt_bound_to_other_authority(
+    postgres_connections, attack
+):
+    actor, install = _persisted_command(postgres_connections)
+    authority = PostgresSkillLifecycleAuthority(
+        privileged_connect=postgres_connections["skill_authority"],
+        evidence_writer_connect=postgres_connections["writer"],
+        clock=lambda: RECEIPT_NOW,
+        ids=_ids(),
+    )
+    authority.install_skill(actor_context=actor, **install)
+    receipt = _activation_receipt(install)
+    if attack == "foreign_actor":
+        receipt["target_scope"]["actor_id"] = "018f0000-0000-7000-8000-0000000000fa"
+    elif attack == "foreign_artifact":
+        receipt["artifact_id"] = "018f0000-0000-7000-8000-0000000000fb"
+    else:
+        receipt["delivery_id"] = "018f0000-0000-7000-8000-0000000000fc"
+    receipt = _sign_runtime_receipt(
+        receipt,
+        proof_domain="activation_receipt.v1",
+        nonce="B" * 22,
+    )
+    activate = copy.deepcopy(install)
+    activate.update(
+        {
+            "operation_id": f"cross-bound-receipt-{attack}",
+            "expected_revision": 1,
+            "activation_receipt": receipt,
+        }
+    )
+    with postgres_connections["writer"]() as writer_connection:
+        authorization = _authorize_lifecycle(writer_connection, actor, "activate", activate)
+        wire = _direct_lifecycle_wire(
+            postgres_connections,
+            actor,
+            activate,
+            "activate",
+            now=RECEIPT_NOW,
+            writer_authorization=authorization,
+        )
+        before = _skill_authority_snapshot(postgres_connections)
+        with (
+            postgres_connections["skill_authority"]() as connection,
+            connection.cursor() as cursor,
+        ):
+            with pytest.raises(
+                Exception, match="activation receipt is not bound to its lifecycle command"
+            ):
+                cursor.execute(
+                    "SELECT gah_activate_skill(%s::jsonb,%s::jsonb)",
+                    (json.dumps(actor), json.dumps(wire)),
+                )
+    assert _skill_authority_snapshot(postgres_connections) == before
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("issued_at", None),
+        ("issued_at", "json_null"),
+        ("expires_at", None),
+        ("expires_at", "json_null"),
+    ),
+)
+def test_direct_sql_rejects_signed_receipt_with_missing_or_null_time(
+    postgres_connections, field, value
+):
+    actor, install = _persisted_command(postgres_connections)
+    PostgresSkillLifecycleAuthority(
+        privileged_connect=postgres_connections["skill_authority"],
+        evidence_writer_connect=postgres_connections["writer"],
+        clock=lambda: RECEIPT_NOW,
+        ids=_ids(),
+    ).install_skill(actor_context=actor, **install)
+    receipt = _activation_receipt(install)
+    if value is None:
+        receipt.pop(field)
+    else:
+        receipt[field] = None
+    receipt = _sign_runtime_receipt(
+        receipt,
+        proof_domain="activation_receipt.v1",
+        nonce="T" * 22,
+    )
+    activate = copy.deepcopy(install)
+    activate.update(
+        {
+            "operation_id": f"invalid-{field}-{value}",
+            "expected_revision": 1,
+            "activation_receipt": receipt,
+        }
+    )
+    with postgres_connections["writer"]() as writer_connection:
+        authorization = _authorize_lifecycle(writer_connection, actor, "activate", activate)
+        wire = _direct_lifecycle_wire(
+            postgres_connections,
+            actor,
+            activate,
+            "activate",
+            now=RECEIPT_NOW,
+            writer_authorization=authorization,
+        )
+        before = _skill_authority_snapshot(postgres_connections)
+        with (
+            postgres_connections["skill_authority"]() as connection,
+            connection.cursor() as cursor,
+        ):
+            with pytest.raises(Exception, match="activation receipt binding shape is invalid"):
+                cursor.execute(
+                    "SELECT gah_activate_skill(%s::jsonb,%s::jsonb)",
+                    (json.dumps(actor), json.dumps(wire)),
+                )
+    assert _skill_authority_snapshot(postgres_connections) == before
+
+
+def test_direct_sql_rejects_rehashed_but_forged_rollback_receipt(
+    postgres_connections,
+):
+    actor, install = _persisted_command(postgres_connections)
+    activation = _activation_receipt(install)
+    rollback = _rollback_receipt(install, activation)
+    authority = PostgresSkillLifecycleAuthority(
+        privileged_connect=postgres_connections["skill_authority"],
+        evidence_writer_connect=postgres_connections["writer"],
+        clock=lambda: RECEIPT_NOW,
+        ids=_ids(),
+        receipt_verifier=_AcceptingVerifier(),
+        receipt_trust=lambda now: _rollback_receipt_trust(now, activation, rollback),
+    )
+    authority.install_skill(actor_context=actor, **install)
+    activate = copy.deepcopy(install)
+    activate.update(
+        {
+            "operation_id": "forged-rollback-prerequisite",
+            "expected_revision": 1,
+            "activation_receipt": activation,
+        }
+    )
+    authority.activate_skill(actor_context=actor, **activate)
+    rollback["reason_code"] = "forged.rollback"
+    apply_object_digest(rollback)
+    rollback["proof"]["object_digest"] = rollback["receipt_digest"]
+    rollback["proof"]["detached_proof"] = "A" * 86
+    rollback_command = copy.deepcopy(install)
+    rollback_command.update(
+        {
+            "operation_id": "forged-rollback-receipt",
+            "expected_revision": 2,
+            "activation_receipt": activation,
+            "rollback_receipt": rollback,
+        }
+    )
+    wire = _direct_lifecycle_wire(
+        postgres_connections, actor, rollback_command, "rollback", now=RECEIPT_NOW
+    )
+    unsigned = dict(wire)
+    unsigned.pop("transition_evidence")
+    unsigned.pop("operation_digest")
+    wire["operation_digest"] = sha256_digest(unsigned)
+    before = _skill_authority_snapshot(postgres_connections)
+    with postgres_connections["skill_authority"]() as connection, connection.cursor() as cursor:
+        with pytest.raises(Exception, match="detached proof verification failed"):
+            cursor.execute(
+                "SELECT gah_rollback_skill(%s::jsonb, %s::jsonb)",
+                (json.dumps(actor), json.dumps(wire)),
+            )
+    assert _skill_authority_snapshot(postgres_connections) == before
+
+
+@pytest.mark.parametrize(
+    "attack",
+    ("activation_receipt_ref", "target_scope", "artifact", "restored_revision_ref"),
+)
+def test_direct_sql_rejects_valid_signed_cross_bound_rollback_receipt(postgres_connections, attack):
+    actor, install = _persisted_command(postgres_connections)
+    activation = _activation_receipt(install)
+    authority = PostgresSkillLifecycleAuthority(
+        privileged_connect=postgres_connections["skill_authority"],
+        evidence_writer_connect=postgres_connections["writer"],
+        clock=lambda: RECEIPT_NOW,
+        ids=_ids(),
+        receipt_verifier=_AcceptingVerifier(),
+        receipt_trust=_receipt_trust,
+    )
+    authority.install_skill(actor_context=actor, **install)
+    activate = copy.deepcopy(install)
+    activate.update(
+        {
+            "operation_id": f"cross-bound-rollback-prerequisite-{attack}",
+            "expected_revision": 1,
+            "activation_receipt": activation,
+        }
+    )
+    authority.activate_skill(actor_context=actor, **activate)
+    rollback = _rollback_receipt(install, activation)
+    if attack == "activation_receipt_ref":
+        rollback["activation_receipt_ref"]["record_id"] = "018f0000-0000-7000-8000-0000000000fa"
+    elif attack == "target_scope":
+        rollback["target_scope"]["actor_id"] = "018f0000-0000-7000-8000-0000000000fb"
+    elif attack == "artifact":
+        rollback["artifact_id"] = "018f0000-0000-7000-8000-0000000000fc"
+    else:
+        rollback["restored_revision_ref"]["record_digest"] = "sha256:" + "f" * 64
+    rollback = _sign_runtime_receipt(
+        rollback,
+        proof_domain="rollback_receipt.v1",
+        nonce="C" * 22,
+    )
+    rollback_command = copy.deepcopy(install)
+    rollback_command.update(
+        {
+            "operation_id": f"cross-bound-rollback-{attack}",
+            "expected_revision": 1,
+            "activation_receipt": activation,
+            "rollback_receipt": rollback,
+        }
+    )
+    with postgres_connections["writer"]() as writer_connection:
+        authorization = _authorize_lifecycle(writer_connection, actor, "rollback", rollback_command)
+        wire = _direct_lifecycle_wire(
+            postgres_connections,
+            actor,
+            rollback_command,
+            "rollback",
+            now=RECEIPT_NOW,
+            writer_authorization=authorization,
+        )
+        before = _skill_authority_snapshot(postgres_connections)
+        with (
+            postgres_connections["skill_authority"]() as connection,
+            connection.cursor() as cursor,
+        ):
+            with pytest.raises(
+                Exception, match="rollback receipt is not bound to its lifecycle command"
+            ):
+                cursor.execute(
+                    "SELECT gah_rollback_skill(%s::jsonb,%s::jsonb)",
+                    (json.dumps(actor), json.dumps(wire)),
+                )
+    assert _skill_authority_snapshot(postgres_connections) == before
 
 
 def test_direct_lifecycle_sql_rejects_tampered_approval_digest_without_mutation(
@@ -2038,6 +2739,129 @@ def test_concurrent_rebuild_replays_once_and_rejects_conflicts(postgres_connecti
     with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
         cursor.execute("SELECT count(*) FROM gah_skill_projection_rebuilds")
         assert cursor.fetchone()[0] == 1
+
+
+def test_rebuild_holds_skill_lock_from_receipt_scan_through_private_replay(
+    postgres_connections,
+):
+    actor, install = _persisted_command(postgres_connections)
+    authority = PostgresSkillLifecycleAuthority(
+        privileged_connect=postgres_connections["skill_authority"],
+        evidence_writer_connect=postgres_connections["writer"],
+        clock=lambda: RECEIPT_NOW,
+        ids=_ids(),
+        receipt_verifier=_AcceptingVerifier(),
+        receipt_trust=_receipt_trust,
+    )
+    authority.install_skill(actor_context=actor, **install)
+    activate = copy.deepcopy(install)
+    activate.update(
+        {
+            "operation_id": "serialized-rebuild-activate",
+            "expected_revision": 1,
+            "activation_receipt": _activation_receipt(install),
+        }
+    )
+    active = authority.activate_skill(actor_context=actor, **activate)
+    rebuild = {
+        "operation_id": "serialized-rebuild-replay",
+        "expected_revision": 1,
+        "skill_id": active.skill_id,
+    }
+    authority.rebuild_skill_projection(actor_context=actor, **rebuild)
+    rebuild_wire = build_skill_lifecycle_wire_command("rebuild", rebuild)
+    blocker = postgres_connections["admin"]()
+    blocker_cursor = blocker.cursor()
+    blocker_cursor.execute(
+        "SELECT 1 FROM gah_skill_projection_rebuilds "
+        "WHERE tenant_id=%s AND actor_id=%s AND operation_id=%s FOR UPDATE",
+        (actor["tenant_id"], actor["actor_id"], rebuild["operation_id"]),
+    )
+
+    def replay_rebuild():
+        with (
+            postgres_connections["skill_authority"]() as connection,
+            connection.cursor() as cursor,
+        ):
+            cursor.execute("SET lock_timeout='5s'")
+            cursor.execute("SET statement_timeout='8s'")
+            cursor.execute(
+                "SELECT gah_rebuild_skill_projection(%s::jsonb,%s::jsonb)",
+                (json.dumps(actor), json.dumps(rebuild_wire)),
+            )
+            return cursor.fetchone()[0]
+
+    deactivate = copy.deepcopy(install)
+    deactivate.update(
+        {
+            "operation_id": "serialized-rebuild-deactivate",
+            "expected_revision": 1,
+        }
+    )
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            rebuild_future = pool.submit(replay_rebuild)
+            deadline = time.monotonic() + 5
+            rebuild_waiting = False
+            while time.monotonic() < deadline:
+                with (
+                    postgres_connections["admin"]() as observer,
+                    observer.cursor() as cursor,
+                ):
+                    cursor.execute(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
+                        "WHERE usename='gah_skill_authority' "
+                        "AND wait_event_type='Lock' "
+                        "AND position('gah_rebuild_skill_projection' IN query)>0)"
+                    )
+                    rebuild_waiting = cursor.fetchone()[0]
+                if rebuild_waiting:
+                    break
+                time.sleep(0.01)
+            assert rebuild_waiting, "rebuild did not pause inside its private replay"
+            deactivate_future = pool.submit(
+                authority.deactivate_skill, actor_context=actor, **deactivate
+            )
+            deadline = time.monotonic() + 5
+            transition_waiting = False
+            while time.monotonic() < deadline:
+                with (
+                    postgres_connections["admin"]() as observer,
+                    observer.cursor() as cursor,
+                ):
+                    cursor.execute(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
+                        "WHERE usename IN ('gah_writer','gah_skill_authority') "
+                        "AND wait_event_type='Lock' "
+                        "AND (position('gah_authorize_skill_lifecycle' IN query)>0 "
+                        "OR position('gah_lock_skill_lifecycle_draft' IN query)>0))"
+                    )
+                    transition_waiting = cursor.fetchone()[0]
+                if transition_waiting:
+                    break
+                time.sleep(0.01)
+            assert transition_waiting
+            assert not rebuild_future.done()
+            assert not deactivate_future.done()
+            blocker.commit()
+            rebuilt = rebuild_future.result(timeout=8)
+            deactivated = deactivate_future.result(timeout=8)
+    finally:
+        blocker.rollback()
+        blocker_cursor.close()
+        blocker.close()
+
+    assert rebuilt["replayed"] is True
+    assert rebuilt["lifecycle_state"] == "active"
+    assert deactivated.lifecycle_state.value == "inactive"
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT array_agg(operation ORDER BY transition_sequence) "
+            "FROM gah_skill_lifecycle_transitions "
+            "WHERE tenant_id=%s AND actor_id=%s AND skill_id=%s",
+            (actor["tenant_id"], actor["actor_id"], active.skill_id),
+        )
+        assert cursor.fetchone()[0] == ["install", "activate", "deactivate"]
 
 
 def test_stale_lifecycle_revision_rolls_back_evidence_and_state(postgres_connections):

@@ -259,6 +259,8 @@ def _parse_command(
     request = ToolRequest(wire["tool_request"], expected_tenant=actor["tenant_id"]).to_dict()
     policy = PolicyDecision(wire["policy_decision"], expected_tenant=actor["tenant_id"]).to_dict()
     gate = GateDecision(wire["gate_decision"], expected_tenant=actor["tenant_id"]).to_dict()
+    if any(not isinstance(value, Mapping) or "revoked_at" in value for value in wire["approvals"]):
+        raise ExecutionAdmissionError("execution approval is revoked or malformed")
     approvals = tuple(
         ApprovalRecord(value, expected_tenant=actor["tenant_id"]).to_dict()
         for value in wire["approvals"]
@@ -833,6 +835,8 @@ class PostgresBuiltinExecutionRuntime:
                     stored["outcome_evidence"],
                     True,
                 ).snapshot()
+            if not isinstance(stored["intent_evidence"], Mapping):
+                raise ExecutionAdmissionError("execution recovery requires a persisted intent")
             outcome = self._outcome(
                 actor=actor,
                 request=request,
@@ -897,7 +901,16 @@ class PostgresBuiltinExecutionRuntime:
         result_payload: Mapping[str, Any],
         status: str,
     ) -> dict[str, Any]:
-        occurred_at = _utc(self._clock())
+        if not isinstance(intent, Mapping):
+            raise ExecutionAdmissionError("execution outcome requires a persisted intent")
+        try:
+            intent_recorded_at = _parse_time(intent["recorded_at"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ExecutionAdmissionError(
+                "execution outcome requires a valid persisted intent"
+            ) from exc
+        clock_time = _parse_time(_utc(self._clock()))
+        occurred_at = _utc(max(clock_time, intent_recorded_at))
         scope = {
             "schema_version": "1.0",
             "record_type": "memory_scope",
