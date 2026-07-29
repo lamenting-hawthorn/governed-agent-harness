@@ -523,6 +523,7 @@ def validate_skill_lifecycle_command(
     """
 
     actor = _as_record(actor_context)
+    validate_record(actor)
     wire = dict(command)
     common = {"operation", "operation_id", "operation_digest", "expected_revision"}
     lifecycle_required = {
@@ -631,6 +632,11 @@ def validate_skill_lifecycle_command(
         or policy.get("isolation_profile") != "no_effect"
     ):
         raise SemanticError("policy decision does not exactly authorize this skill proposal")
+    # This slice deliberately has no lifecycle constraint implementation
+    # registry.  Accepting an opaque non-empty list would claim enforcement we
+    # do not provide, so the only supported canonical value is an empty list.
+    if policy.get("constraints") != []:
+        raise SemanticError("skill lifecycle policy constraints must be exactly empty")
     approvals = tuple(_as_record(value) for value in wire["approvals"])
     for approval in approvals:
         validate_record(approval, expected_tenant=actor["tenant_id"])
@@ -712,8 +718,14 @@ def validate_skill_lifecycle_command(
         for value in evidence
     ):
         raise SemanticError("skill lifecycle source evidence is invalid or cross-tenant")
-    if wire["retention"].get("expires_at") is None or wire["validity"].get("expires_at") is None:
+    retention = wire["retention"]
+    validity = wire["validity"]
+    if not isinstance(retention, Mapping) or not isinstance(validity, Mapping):
+        raise SemanticError("skill lifecycle retention and validity must be JSON objects")
+    if retention.get("expires_at") is None or validity.get("expires_at") is None:
         raise SemanticError("skill lifecycle retention and validity expiries are required")
+    if now is not None and _parse_timestamp(policy["decided_at"], "policy.decided_at") > now:
+        raise SemanticError("skill lifecycle policy decision is in the future")
     if operation == "install":
         if wire["activation_receipt"] is not None or wire["rollback_receipt"] is not None:
             raise SemanticError("install must not accept runtime receipts")

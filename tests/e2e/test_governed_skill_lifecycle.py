@@ -124,7 +124,7 @@ def _ids():
 
 def _persisted_command(postgres_connections):
     actor, command = build_command()
-    actor["issued_at"] = "2025-01-01T00:00:00.000Z"
+    actor["issued_at"] = actor["auth"]["verified_at"]
     actor["expires_at"] = "2030-01-01T00:00:00.000Z"
     target_scope = command["skill_proposal"]["target_scope"]
     target_scope["parent_digest"] = sha256_digest(actor)

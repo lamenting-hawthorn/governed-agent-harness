@@ -14,13 +14,196 @@ from hashlib import sha256
 import pytest
 from nacl.signing import SigningKey
 
-from governed_agent_harness.contracts import apply_object_digest
+from governed_agent_harness.contracts import apply_object_digest, validate_skill_lifecycle_command
+from governed_agent_harness.contracts.errors import SemanticError
 from governed_agent_harness.persistence.skills import (
     build_skill_lifecycle_wire_command,
     skill_lifecycle_operation_digest,
 )
 
 import test_governed_skill_lifecycle as lifecycle
+
+
+@pytest.mark.parametrize(
+    "field,value", (("retention", None), ("retention", []), ("validity", "bad"))
+)
+def test_phase51_lifecycle_rejects_non_mapping_validity_before_dereference(
+    postgres_connections, field, value
+):
+    """Malformed expiry containers are contract errors, never AttributeError."""
+
+    actor, command = lifecycle._persisted_command(postgres_connections)
+    command[field] = value
+    wire = build_skill_lifecycle_wire_command("install", command)
+    with pytest.raises(SemanticError, match="retention and validity must be JSON objects"):
+        validate_skill_lifecycle_command(actor_context=actor, command=wire)
+
+
+@pytest.mark.parametrize("removed", ("session_id", "auth", "scope_authority"))
+def test_phase51_partial_actor_cannot_replay_through_python_or_sql(postgres_connections, removed):
+    """A schema-invalid actor cannot take either replay fast path."""
+
+    actor, command = lifecycle._persisted_command(postgres_connections)
+    authority = lifecycle.PostgresSkillLifecycleAuthority(
+        privileged_connect=postgres_connections["skill_authority"],
+        evidence_writer_connect=postgres_connections["writer"],
+        clock=lambda: lifecycle.NOW,
+        ids=lifecycle._ids(),
+    )
+    authority.install_skill(actor_context=actor, **command)
+    partial = copy.deepcopy(actor)
+    partial.pop(removed)
+    before = lifecycle._skill_authority_snapshot(postgres_connections)
+    with pytest.raises(Exception):
+        authority.install_skill(actor_context=partial, **command)
+    wire = build_skill_lifecycle_wire_command("install", command)
+    with postgres_connections["skill_authority"]() as connection, connection.cursor() as cursor:
+        with pytest.raises(Exception):
+            cursor.execute(
+                "SELECT gah_lookup_skill_replay(%s::jsonb,%s::jsonb)",
+                (json.dumps(partial), json.dumps(wire)),
+            )
+    rebuild = {
+        "operation_id": f"phase51-partial-actor-rebuild-{removed}",
+        "expected_revision": 1,
+        "skill_id": command["skill_proposal"]["artifact_id"],
+    }
+    with pytest.raises(Exception):
+        authority.rebuild_skill_projection(actor_context=partial, **rebuild)
+    rebuild_wire = build_skill_lifecycle_wire_command("rebuild", rebuild)
+    with postgres_connections["skill_authority"]() as connection, connection.cursor() as cursor:
+        with pytest.raises(Exception):
+            cursor.execute(
+                "SELECT gah_rebuild_skill_projection(%s::jsonb,%s::jsonb)",
+                (json.dumps(partial), json.dumps(rebuild_wire)),
+            )
+    assert lifecycle._skill_authority_snapshot(postgres_connections) == before
+
+
+def _unsupported_constraint():
+    return {
+        "constraint_id": "example.invalid/unsupported",
+        "constraint_version": "v1",
+        "parameters": {"mode": "opaque"},
+        "parameters_digest": lifecycle.sha256_digest({"mode": "opaque"}),
+    }
+
+
+@pytest.mark.parametrize(
+    ("attack", "requires_approval"),
+    (
+        ("constraints", False),
+        ("constraints", True),
+        ("future_policy", False),
+        ("future_policy", True),
+    ),
+)
+def test_phase51_direct_lifecycle_sink_rejects_unsupported_or_future_policy_without_mutation(
+    postgres_connections, attack, requires_approval
+):
+    """The SECURITY DEFINER sink enforces the common policy checks itself."""
+
+    actor, command = (
+        lifecycle._approval_required_command(postgres_connections)
+        if requires_approval
+        else lifecycle._persisted_command(postgres_connections)
+    )
+    policy = command["policy_decision"]
+    if attack == "constraints":
+        policy["constraints"] = [_unsupported_constraint()]
+    else:
+        policy["decided_at"] = "2030-01-01T00:00:00.000Z"
+    apply_object_digest(policy)
+    if requires_approval:
+        approval = command["approvals"][0]
+        approval["policy_decision_digest"] = policy["decision_digest"]
+        approval["constraints"] = copy.deepcopy(policy["constraints"])
+        approval = lifecycle._sign_policy_approval(approval)
+        command["approvals"] = [approval]
+        command["delivery_envelope"]["reviewer_refs"] = [
+            lifecycle.ref("approval_record", approval["approval_id"], approval["approval_digest"])
+        ]
+    command["delivery_envelope"]["policy_refs"] = [
+        lifecycle.ref("policy_decision", policy["decision_id"], policy["decision_digest"])
+    ]
+    apply_object_digest(command["delivery_envelope"])
+    before = lifecycle._skill_authority_snapshot(postgres_connections)
+    with postgres_connections["writer"]() as writer_connection:
+        authorization = lifecycle._authorize_lifecycle(writer_connection, actor, "install", command)
+        wire = lifecycle._direct_lifecycle_wire(
+            postgres_connections, actor, command, writer_authorization=authorization
+        )
+        with pytest.raises(Exception, match="policy"):
+            lifecycle._direct_apply(postgres_connections, actor, "gah_install_skill", wire)
+    assert lifecycle._skill_authority_snapshot(postgres_connections) == before
+
+
+@pytest.mark.parametrize("attack", ("constraints", "future_policy"))
+def test_phase51_persisted_replay_and_rebuild_reject_policy_poison_without_mutation(
+    postgres_connections, attack
+):
+    """Stored authorization poison cannot be replayed or rebuilt through 0017."""
+
+    actor, command = lifecycle._persisted_command(postgres_connections)
+    with postgres_connections["writer"]() as writer_connection:
+        authorization = lifecycle._authorize_lifecycle(writer_connection, actor, "install", command)
+        wire = lifecycle._direct_lifecycle_wire(
+            postgres_connections, actor, command, writer_authorization=authorization
+        )
+        lifecycle._direct_apply(postgres_connections, actor, "gah_install_skill", wire)
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT command_json FROM gah_skill_lifecycle_transitions "
+            "WHERE tenant_id=%s AND actor_id=%s AND operation_id=%s",
+            (actor["tenant_id"], actor["actor_id"], command["operation_id"]),
+        )
+        poisoned = copy.deepcopy(cursor.fetchone()[0])
+        policy = poisoned["policy_decision"]
+        if attack == "constraints":
+            policy["constraints"] = [_unsupported_constraint()]
+        else:
+            policy["decided_at"] = "2030-01-01T00:00:00.000Z"
+        apply_object_digest(policy)
+        poisoned["delivery_envelope"]["policy_refs"] = [
+            lifecycle.ref("policy_decision", policy["decision_id"], policy["decision_digest"])
+        ]
+        apply_object_digest(poisoned["delivery_envelope"])
+        unsigned = dict(poisoned)
+        unsigned.pop("operation_digest")
+        poisoned["operation_digest"] = skill_lifecycle_operation_digest(unsigned)
+        cursor.execute(
+            "UPDATE gah_skill_lifecycle_transitions SET operation_digest=%s,command_json=%s::jsonb "
+            "WHERE tenant_id=%s AND actor_id=%s AND operation_id=%s",
+            (
+                poisoned["operation_digest"],
+                json.dumps(poisoned),
+                actor["tenant_id"],
+                actor["actor_id"],
+                command["operation_id"],
+            ),
+        )
+    before = lifecycle._skill_authority_snapshot(postgres_connections)
+    with postgres_connections["skill_authority"]() as connection, connection.cursor() as cursor:
+        with pytest.raises(Exception, match="policy"):
+            cursor.execute(
+                "SELECT gah_lookup_skill_replay(%s::jsonb,%s::jsonb)",
+                (json.dumps(actor), json.dumps(poisoned)),
+            )
+        connection.rollback()
+        rebuild = build_skill_lifecycle_wire_command(
+            "rebuild",
+            {
+                "operation_id": f"phase51-{attack}-poison-rebuild",
+                "expected_revision": 1,
+                "skill_id": command["skill_proposal"]["artifact_id"],
+            },
+        )
+        with pytest.raises(Exception, match="policy"):
+            cursor.execute(
+                "SELECT gah_rebuild_skill_projection(%s::jsonb,%s::jsonb)",
+                (json.dumps(actor), json.dumps(rebuild)),
+            )
+    assert lifecycle._skill_authority_snapshot(postgres_connections) == before
 
 
 @pytest.mark.parametrize("window", ("valid", "expired", "revoked"))
@@ -190,9 +373,9 @@ def test_phase51_0016_actor_scope_and_lifecycle_sink_catalog_contract(postgres_c
     verifier = functions["gah_verify_lifecycle_approvals(jsonb,timestamp with time zone,boolean)"][
         3
     ]
-    assert "gah_verify_execution_signed_record" in verifier
-    assert "approval_record.v1" in verifier
-    assert "revoked_at" in verifier
+    assert "gah_verify_lifecycle_approvals_0016" in verifier
+    assert "constraints" in verifier
+    assert "policy_decided_at > p_accepted_at" in verifier
     for signature in (
         "gah_lookup_skill_replay(jsonb,jsonb)",
         "gah_apply_skill_lifecycle(jsonb,jsonb,text)",
@@ -375,7 +558,7 @@ def test_phase51_direct_lifecycle_sink_rejects_approval_before_bound_policy(
         )
         with pytest.raises(
             Exception,
-            match="approval.*policy|policy.*approval|lifecycle approval authority binding",
+            match="approval.*policy|policy.*approval|lifecycle approval authority binding|policy decision",
         ):
             lifecycle._direct_apply(postgres_connections, actor, "gah_install_skill", wire)
     assert lifecycle._skill_authority_snapshot(postgres_connections) == before
@@ -498,7 +681,7 @@ def test_phase51_persisted_replay_rejects_approval_before_bound_policy(
     with postgres_connections["skill_authority"]() as connection, connection.cursor() as cursor:
         with pytest.raises(
             Exception,
-            match="approval.*policy|policy.*approval|lifecycle approval authority binding",
+            match="approval.*policy|policy.*approval|lifecycle approval authority binding|policy decision",
         ):
             cursor.execute(
                 "SELECT gah_lookup_skill_replay(%s::jsonb,%s::jsonb)",
@@ -515,7 +698,7 @@ def test_phase51_persisted_replay_rejects_approval_before_bound_policy(
         )
         with pytest.raises(
             Exception,
-            match="approval.*policy|policy.*approval|lifecycle approval authority binding",
+            match="approval.*policy|policy.*approval|lifecycle approval authority binding|policy decision",
         ):
             cursor.execute(
                 "SELECT gah_rebuild_skill_projection(%s::jsonb,%s::jsonb)",

@@ -165,7 +165,7 @@ def test_approval_constraints_and_separation_are_bound_to_skill_authority() -> N
     approval = copy.deepcopy(records["approval_record"])
     policy = command["policy_decision"]
     policy["decision"] = "require_approval"
-    policy["constraints"] = copy.deepcopy(approval["constraints"])
+    policy["constraints"] = []
     apply_object_digest(policy)
     approval.update(
         {
@@ -173,6 +173,7 @@ def test_approval_constraints_and_separation_are_bound_to_skill_authority() -> N
             "request_digest": command["skill_proposal"]["proposal_digest"],
             "policy_decision_id": policy["decision_id"],
             "policy_decision_digest": policy["decision_digest"],
+            "constraints": [],
         }
     )
     apply_object_digest(approval)
@@ -203,6 +204,36 @@ def test_approval_constraints_and_separation_are_bound_to_skill_authority() -> N
         validate_skill_lifecycle_command(
             actor_context=actor,
             command=build_skill_lifecycle_wire_command("install", changed),
+        )
+
+    unsupported = copy.deepcopy(command)
+    unsupported_policy = unsupported["policy_decision"]
+    unsupported_policy["constraints"] = copy.deepcopy(records["approval_record"]["constraints"])
+    apply_object_digest(unsupported_policy)
+    unsupported_approval = unsupported["approvals"][0]
+    unsupported_approval["policy_decision_digest"] = unsupported_policy["decision_digest"]
+    unsupported_approval["constraints"] = copy.deepcopy(unsupported_policy["constraints"])
+    apply_object_digest(unsupported_approval)
+    unsupported_delivery = unsupported["delivery_envelope"]
+    unsupported_delivery["policy_refs"] = [
+        _ref(
+            "policy_decision",
+            unsupported_policy["decision_id"],
+            unsupported_policy["decision_digest"],
+        )
+    ]
+    unsupported_delivery["reviewer_refs"] = [
+        _ref(
+            "approval_record",
+            unsupported_approval["approval_id"],
+            unsupported_approval["approval_digest"],
+        )
+    ]
+    apply_object_digest(unsupported_delivery)
+    with pytest.raises(SemanticError, match="constraints must be exactly empty"):
+        validate_skill_lifecycle_command(
+            actor_context=actor,
+            command=build_skill_lifecycle_wire_command("install", unsupported),
         )
 
 

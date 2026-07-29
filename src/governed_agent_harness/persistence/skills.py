@@ -20,6 +20,7 @@ from governed_agent_harness.contracts import (
     DetachedProofVerifier,
     TrustContext,
     sha256_digest,
+    validate_record,
     skill_lifecycle_operation_digest,
     validate_skill_lifecycle_command,
 )
@@ -289,6 +290,9 @@ class PostgresSkillLifecycleAuthority:
         actor_context: Mapping[str, Any],
         command: Mapping[str, Any],
     ) -> SkillLifecycleResult:
+        # The replay fast path is authority-bearing: validate the full actor
+        # contract before it can query persisted state.
+        validate_record(actor_context)
         wire = build_skill_lifecycle_wire_command(operation, command)
         digest = wire["operation_digest"]
         expected_transition_digest = None
