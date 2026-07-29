@@ -76,8 +76,8 @@ jobs:
         run: |
           mkdir -p /tmp/gah-pynacl-source
           python -m pip download --no-deps --no-binary=:all: --dest /tmp/gah-pynacl-source PyNaCl==1.6.2
-          test "$(sha256sum /tmp/gah-pynacl-source/PyNaCl-1.6.2.tar.gz | awk '{print $1}')" = "018494d6d696ae03c7e656e5e74cdfd8ea1326962cc401bcf018f1ed8436811c"
-          python -m pip install --no-deps /tmp/gah-pynacl-source/PyNaCl-1.6.2.tar.gz
+          test "$(sha256sum /tmp/gah-pynacl-source/pynacl-1.6.2.tar.gz | awk '{print $1}')" = "018494d6d696ae03c7e656e5e74cdfd8ea1326962cc401bcf018f1ed8436811c"
+          python -m pip install --no-deps /tmp/gah-pynacl-source/pynacl-1.6.2.tar.gz
 
       - name: Install test dependencies
         run: |
