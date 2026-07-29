@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import hmac
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -16,6 +16,8 @@ from .errors import ContractError, IdempotencyConflictError, ProofVerificationEr
 from .schema import DEFAULT_SCHEMA_STORE, SchemaStore
 
 EXTENSIONS_CANONICAL_BYTE_LIMIT = 8 * 1024
+INERT_SKILL_ARTIFACT_CANONICAL_BYTE_LIMIT = 64 * 1024
+SKILL_LIFECYCLE_OPERATIONS = frozenset({"install", "activate", "rollback", "deactivate", "rebuild"})
 
 SELF_DIGEST_FIELDS: Mapping[str, str] = {
     "evidence_envelope": "event_digest",
@@ -412,6 +414,10 @@ def validate_memory_promotion_bindings(
     """Validate promotion's cross-record identity bindings before persistence."""
 
     actor = _as_record(actor_context)
+    # Parse the canonical contracts before applying lifecycle-specific joins.
+    # This rejects look-alike dictionaries and validates every source-evidence
+    # envelope/self-digest before its reference can authorize a transition.
+    validate_record(actor)
     candidate_proposal = _as_record(proposal)
     decision = _as_record(memory_decision)
     policy = _as_record(policy_decision)
@@ -475,6 +481,315 @@ def validate_memory_promotion_bindings(
             or approval.get("approver_actor_id") == actor.get("actor_id")
         ):
             raise SemanticError("approval does not satisfy separation of duties")
+
+
+def skill_lifecycle_operation_digest(command: Mapping[str, Any]) -> str:
+    """Return the digest of the exact wire command accepted by PostgreSQL."""
+
+    return sha256_digest(dict(command))
+
+
+def _skill_ref(record_type: str, record_id: Any, digest: Any) -> dict[str, Any]:
+    return {"record_type": record_type, "record_id": record_id, "record_digest": digest}
+
+
+def _validate_inert_skill_artifact(artifact: Any) -> dict[str, Any]:
+    if not isinstance(artifact, Mapping):
+        raise SemanticError("skill artifact must be an inline JSON object")
+    result = dict(artifact)
+    if any(key in result for key in ("archive", "protected_payload", "remote_uri", "entrypoint")):
+        raise SemanticError("skill artifact must remain inert inline data")
+    if len(canonical_bytes(result)) > INERT_SKILL_ARTIFACT_CANONICAL_BYTE_LIMIT:
+        raise SemanticError("skill artifact exceeds the canonical inert-artifact size limit")
+    return result
+
+
+def validate_skill_lifecycle_command(
+    *,
+    actor_context: Any,
+    command: Mapping[str, Any],
+    now: datetime | None = None,
+    approval_verifier: DetachedProofVerifier | None = None,
+    approval_trust: Callable[[datetime], TrustContext] | None = None,
+    receipt_verifier: DetachedProofVerifier | None = None,
+    receipt_trust: Callable[[datetime], TrustContext] | None = None,
+) -> str:
+    """Validate one canonical, inert skill lifecycle command.
+
+    This deliberately verifies *source* evidence objects, rather than accepting
+    caller-supplied references alone.  It is shared by the Python authority
+    wrapper and the SQL wire contract; PostgreSQL then repeats the immutable
+    identity and state-machine checks under its transaction lock.
+    """
+
+    actor = _as_record(actor_context)
+    wire = dict(command)
+    common = {"operation", "operation_id", "operation_digest", "expected_revision"}
+    lifecycle_required = {
+        "operation",
+        "operation_id",
+        "operation_digest",
+        "expected_revision",
+        "skill_proposal",
+        "artifact",
+        "gate_decision",
+        "delivery_envelope",
+        "policy_decision",
+        "approvals",
+        "source_evidence",
+        "retention",
+        "validity",
+        "activation_receipt",
+        "rollback_receipt",
+    }
+    operation = wire["operation"]
+    if operation not in SKILL_LIFECYCLE_OPERATIONS:
+        raise SemanticError("unknown skill lifecycle operation")
+    required = common | {"skill_id"} if operation == "rebuild" else lifecycle_required
+    if set(wire) != required:
+        raise SemanticError("skill lifecycle command keys do not match the canonical wire contract")
+    if not isinstance(wire["operation_id"], str) or not wire["operation_id"]:
+        raise SemanticError("skill lifecycle operation_id is required")
+    supplied_digest = wire["operation_digest"]
+    unsigned = dict(wire)
+    unsigned.pop("operation_digest")
+    expected_digest = skill_lifecycle_operation_digest(unsigned)
+    if not isinstance(supplied_digest, str) or not hmac.compare_digest(
+        supplied_digest, expected_digest
+    ):
+        raise SemanticError("skill lifecycle operation_digest does not bind the exact command")
+    if actor.get("record_type") != "actor_context":
+        raise SemanticError("skill lifecycle requires an actor context")
+    if operation == "rebuild":
+        if not isinstance(wire["skill_id"], str) or not wire["skill_id"]:
+            raise SemanticError("skill projection rebuild requires one exact skill_id")
+        if not isinstance(wire["expected_revision"], int) or wire["expected_revision"] < 1:
+            raise SemanticError("skill projection rebuild requires an exact expected revision")
+        return expected_digest
+    proposal = _as_record(wire["skill_proposal"])
+    gate = _as_record(wire["gate_decision"])
+    delivery = _as_record(wire["delivery_envelope"])
+    policy = _as_record(wire["policy_decision"])
+    artifact = _validate_inert_skill_artifact(wire["artifact"])
+    for record in (proposal, gate, delivery, policy):
+        validate_record(record, expected_tenant=actor["tenant_id"])
+    tenant = actor.get("tenant_id")
+    for record, label in (
+        (proposal, "skill proposal"),
+        (gate, "gate decision"),
+        (delivery, "delivery envelope"),
+        (policy, "policy decision"),
+    ):
+        if record.get("tenant_id") != tenant:
+            raise SemanticError(f"{label} tenant does not match actor")
+    validate_scope_narrowing(proposal.get("target_scope", {}), actor)
+    if proposal["target_scope"].get("selection") != {"level": "actor"}:
+        raise SemanticError("skill lifecycle target scope must be actor-only")
+    if gate.get("target_scope") != proposal.get("target_scope") or delivery.get(
+        "target_scope"
+    ) != proposal.get("target_scope"):
+        raise SemanticError("skill lifecycle target scopes must exactly match")
+    if (
+        proposal.get("record_type") != "skill_proposal"
+        or proposal.get("protected_artifact") is not None
+    ):
+        raise SemanticError("an inline skill proposal is required")
+    if proposal.get("artifact") != artifact:
+        raise SemanticError("skill proposal artifact does not exactly match the inert artifact")
+    artifact_digest = sha256_digest(artifact)
+    if (
+        gate.get("record_type") != "gate_decision"
+        or gate.get("decision") != "approve"
+        or gate.get("proposal_refs")
+        != [
+            _skill_ref(
+                "skill_proposal", proposal.get("proposal_id"), proposal.get("proposal_digest")
+            )
+        ]
+    ):
+        raise SemanticError("gate decision does not exactly approve this skill proposal")
+    policy_ref = _skill_ref(
+        "policy_decision", policy.get("decision_id"), policy.get("decision_digest")
+    )
+    if (
+        delivery.get("record_type") != "delivery_envelope"
+        or delivery.get("artifact_type") != "skill"
+        or delivery.get("lifecycle_state") != "delivered"
+        or delivery.get("artifact_id") != proposal.get("artifact_id")
+        or delivery.get("artifact_revision") != proposal.get("artifact_revision")
+        or delivery.get("artifact_digest") != artifact_digest
+        or delivery.get("gate_decision_ref")
+        != _skill_ref("gate_decision", gate.get("gate_id"), gate.get("decision_digest"))
+        or delivery.get("policy_refs") != [policy_ref]
+    ):
+        raise SemanticError("delivery envelope does not exactly bind the approved skill artifact")
+    if (
+        policy.get("record_type") != "policy_decision"
+        or policy.get("request_id") != proposal.get("proposal_id")
+        or policy.get("request_digest") != proposal.get("proposal_digest")
+        or policy.get("decision") not in {"authorize", "require_approval"}
+        or policy.get("isolation_profile") != "no_effect"
+    ):
+        raise SemanticError("policy decision does not exactly authorize this skill proposal")
+    approvals = tuple(_as_record(value) for value in wire["approvals"])
+    for approval in approvals:
+        validate_record(approval, expected_tenant=actor["tenant_id"])
+    if policy.get("decision") == "authorize" and approvals:
+        raise SemanticError("authorize skill lifecycle cannot carry approvals")
+    if policy.get("decision") == "require_approval" and not approvals:
+        raise SemanticError("approval-required skill lifecycle has no approval")
+    approval_refs = []
+    for approval in approvals:
+        if (
+            approval.get("tenant_id") != tenant
+            or approval.get("request_id") != proposal.get("proposal_id")
+            or approval.get("request_digest") != proposal.get("proposal_digest")
+            or approval.get("policy_decision_id") != policy.get("decision_id")
+            or approval.get("policy_decision_digest") != policy.get("decision_digest")
+            or approval.get("disposition") != "approved"
+            or "revoked_at" in approval
+            or approval.get("constraints") != policy.get("constraints")
+        ):
+            raise SemanticError("approval does not exactly bind the skill authority")
+        duties = approval.get("separation_of_duties", {})
+        if duties.get("required") and (
+            not duties.get("satisfied")
+            or approval.get("approver_actor_id") == actor.get("actor_id")
+        ):
+            raise SemanticError("skill approval does not satisfy separation of duties")
+        approval_refs.append(
+            _skill_ref(
+                "approval_record", approval.get("approval_id"), approval.get("approval_digest")
+            )
+        )
+    if now is not None:
+        if approvals and (approval_verifier is None or approval_trust is None):
+            raise SemanticError("skill approval proof verification is not configured")
+        for approval in approvals:
+            if (
+                not _parse_timestamp(approval["issued_at"], "approval.issued_at")
+                <= now
+                < _parse_timestamp(approval["expires_at"], "approval.expires_at")
+            ):
+                raise SemanticError("skill approval is not currently valid")
+            assert approval_verifier is not None and approval_trust is not None
+            trust = approval_trust(now)
+            if not isinstance(trust, TrustContext) or trust.now != now:
+                raise SemanticError(
+                    "skill approval trust context does not match the requested time"
+                )
+            verify_signed_record(
+                approval,
+                verifier=approval_verifier,
+                trust=trust,
+                expected_tenant=actor["tenant_id"],
+            )
+    if (
+        policy.get("decision") == "require_approval"
+        and delivery.get("reviewer_refs") != approval_refs
+    ):
+        raise SemanticError("delivery reviewers do not exactly match supplied approvals")
+    receipt_reviewer_refs = (
+        approval_refs
+        if policy.get("decision") == "require_approval"
+        else delivery.get("reviewer_refs")
+    )
+    evidence = tuple(_as_record(value) for value in wire["source_evidence"])
+    for envelope in evidence:
+        validate_record(envelope, expected_tenant=actor["tenant_id"])
+    evidence_refs = [
+        _skill_ref("evidence_envelope", value.get("envelope_id"), value.get("event_digest"))
+        for value in evidence
+    ]
+    if (
+        not evidence
+        or proposal.get("evidence_refs") != evidence_refs
+        or delivery.get("evidence_refs") != evidence_refs
+    ):
+        raise SemanticError("canonical source evidence does not exactly bind proposal and delivery")
+    if any(
+        value.get("record_type") != "evidence_envelope" or value.get("tenant_id") != tenant
+        for value in evidence
+    ):
+        raise SemanticError("skill lifecycle source evidence is invalid or cross-tenant")
+    if wire["retention"].get("expires_at") is None or wire["validity"].get("expires_at") is None:
+        raise SemanticError("skill lifecycle retention and validity expiries are required")
+    if operation == "install":
+        if wire["activation_receipt"] is not None or wire["rollback_receipt"] is not None:
+            raise SemanticError("install must not accept runtime receipts")
+        if wire["expected_revision"] is not None and (
+            not isinstance(wire["expected_revision"], int) or wire["expected_revision"] < 1
+        ):
+            raise SemanticError("install expected_revision is malformed")
+    elif not isinstance(wire["expected_revision"], int) or wire["expected_revision"] < 1:
+        raise SemanticError("skill transition requires an exact expected revision")
+    if operation == "activate":
+        receipt = _as_record(wire["activation_receipt"])
+        if (
+            wire["rollback_receipt"] is not None
+            or receipt.get("record_type") != "activation_receipt"
+        ):
+            raise SemanticError("activate requires exactly one activation receipt")
+        validate_record(receipt, expected_tenant=actor["tenant_id"])
+        if now is not None:
+            if receipt_verifier is None or receipt_trust is None:
+                raise SemanticError("runtime receipt verification is not configured")
+            trust = receipt_trust(now)
+            if not isinstance(trust, TrustContext) or trust.now != now:
+                raise SemanticError(
+                    "runtime receipt trust context does not match the requested time"
+                )
+            verify_runtime_receipt(
+                receipt,
+                verifier=receipt_verifier,
+                trust=trust,
+                expected_tenant=actor["tenant_id"],
+            )
+        validate_activation_delivery_binding(receipt, delivery)
+        if (
+            receipt.get("policy_refs") != [policy_ref]
+            or receipt.get("reviewer_refs") != receipt_reviewer_refs
+        ):
+            raise SemanticError("activation receipt authority does not exactly match command")
+    elif operation == "rollback":
+        receipt = _as_record(wire["rollback_receipt"])
+        activation = _as_record(wire["activation_receipt"])
+        if (
+            receipt.get("record_type") != "rollback_receipt"
+            or activation.get("record_type") != "activation_receipt"
+        ):
+            raise SemanticError("rollback requires bound rollback and activation receipts")
+        validate_record(receipt, expected_tenant=actor["tenant_id"])
+        validate_record(activation, expected_tenant=actor["tenant_id"])
+        if now is not None:
+            if receipt_verifier is None or receipt_trust is None:
+                raise SemanticError("runtime receipt verification is not configured")
+            trust = receipt_trust(now)
+            if not isinstance(trust, TrustContext) or trust.now != now:
+                raise SemanticError(
+                    "runtime receipt trust context does not match the requested time"
+                )
+            validate_rollback_lifecycle(
+                receipt,
+                activation,
+                verifier=receipt_verifier,
+                trust=trust,
+                expected_tenant=actor["tenant_id"],
+            )
+        validate_rollback_activation_binding(receipt, activation)
+        restored = _skill_ref("skill_proposal", proposal.get("artifact_id"), artifact_digest)
+        if (
+            receipt.get("artifact_id") != proposal.get("artifact_id")
+            or receipt.get("policy_refs") != [policy_ref]
+            or receipt.get("reviewer_refs") != receipt_reviewer_refs
+            or receipt.get("restored_revision_ref") != restored
+        ):
+            raise SemanticError("rollback receipt does not bind this skill authority")
+    elif operation in {"deactivate", "rebuild"} and (
+        wire["activation_receipt"] is not None or wire["rollback_receipt"] is not None
+    ):
+        raise SemanticError(f"{operation} must not accept runtime receipts")
+    return expected_digest
 
 
 def _require_same(left: Mapping[str, Any], right: Mapping[str, Any], fields: Iterable[str]) -> None:
