@@ -4,7 +4,6 @@ import os
 import shutil
 import subprocess
 import threading
-from hashlib import sha256
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -95,87 +94,36 @@ def postgres_connections(postgres_server: dict[str, str], tmp_path: Path):
     with admin.cursor() as cursor:
         cursor.execute("DROP ROLE IF EXISTS gah_app")
         cursor.execute("DROP ROLE IF EXISTS gah_writer")
-        cursor.execute("DROP ROLE IF EXISTS gah_skill_authority")
-        cursor.execute("DROP ROLE IF EXISTS gah_execution_authority")
         cursor.execute("CREATE ROLE gah_app LOGIN NOSUPERUSER NOBYPASSRLS INHERIT")
         cursor.execute("CREATE ROLE gah_writer LOGIN NOSUPERUSER NOBYPASSRLS INHERIT")
-        cursor.execute("CREATE ROLE gah_skill_authority LOGIN NOSUPERUSER NOBYPASSRLS INHERIT")
-        cursor.execute("CREATE ROLE gah_execution_authority LOGIN NOSUPERUSER NOBYPASSRLS INHERIT")
     admin.close()
     PostgresDurableEffectStore.install_schema(
         admin_connect=lambda: psycopg.connect(**admin_values),
         application_role="gah_app",
         authority_role="gah_writer",
-        skill_lifecycle_authority_role="gah_skill_authority",
-        execution_admission_authority_role="gah_execution_authority",
     )
-    from nacl.signing import SigningKey
-
-    test_public_key = SigningKey(
-        bytes.fromhex("2f4b0b6f0906b7c5e3f0a25e7c5c9ddbcf8d175b75a5a09b2a1dc38841f47c72")
-    ).verify_key.encode()
-    with psycopg.connect(**admin_values) as connection, connection.cursor() as cursor:
-        proof_bindings = (
-            ("policy.authority", "policy.key.v1", "approval_record.v1"),
-            ("policy.authority", "policy.key.v1", "authorization_grant.v1"),
-            ("runtime.authority", "runtime.key.v1", "activation_receipt.v1"),
-            ("runtime.authority", "runtime.key.v1", "rollback_receipt.v1"),
-        )
-        for issuer, key_id, proof_domain in proof_bindings:
-            cursor.execute(
-                "INSERT INTO gah_execution_proof_keys ("
-                "issuer,key_id,algorithm,proof_domain,public_key,public_key_fingerprint,"
-                "trust_policy_version,trust_policy_digest,valid_from,valid_until"
-                ") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::timestamptz,%s::timestamptz) "
-                "ON CONFLICT DO NOTHING",
-                (
-                    issuer,
-                    key_id,
-                    "ed25519-rfc8032-gah-cjson-v1",
-                    proof_domain,
-                    test_public_key,
-                    "sha256:" + sha256(test_public_key).hexdigest(),
-                    "phase5.1.test.v1",
-                    "sha256:" + "1" * 64,
-                    "2025-01-01T00:00:00.000Z",
-                    "2030-01-01T00:00:00.000Z",
-                ),
-            )
     from governed_agent_harness.contracts.positive_fixtures import build_positive_records
 
     actor = build_positive_records()["actor_context"]
     PostgresDurableEffectStore.provision_principal(
         admin_connect=lambda: psycopg.connect(**admin_values),
-        database_roles=(
-            "gah_app",
-            "gah_writer",
-            "gah_skill_authority",
-            "gah_execution_authority",
-        ),
+        database_roles=("gah_app", "gah_writer"),
         actor_context=actor,
     )
     reset = psycopg.connect(**admin_values)
     reset.autocommit = True
     with reset.cursor() as cursor:
         cursor.execute(
-            "TRUNCATE gah_builtin_execution_state, "
-            "gah_active_skill_projection, gah_skill_projection_rebuilds, "
-            "gah_skill_lifecycle_transitions, "
-            "gah_skill_artifact_revisions, gah_memory_transitions, gah_grant_consumptions, "
-            "gah_effect_executions, gah_request_lifecycle, gah_evidence_events, gah_run_heads, "
-            "gah_memory_records"
+            "TRUNCATE gah_memory_transitions, gah_grant_consumptions, gah_effect_executions, "
+            "gah_request_lifecycle, gah_evidence_events, gah_run_heads, gah_memory_records"
         )
     reset.close()
     app_values = {**admin_values, "user": "gah_app"}
     writer_values = {**admin_values, "user": "gah_writer"}
-    skill_authority_values = {**admin_values, "user": "gah_skill_authority"}
-    execution_authority_values = {**admin_values, "user": "gah_execution_authority"}
     yield {
         "admin": lambda: psycopg.connect(**admin_values),
         "app": lambda: psycopg.connect(**app_values),
         "writer": lambda: psycopg.connect(**writer_values),
-        "skill_authority": lambda: psycopg.connect(**skill_authority_values),
-        "execution_authority": lambda: psycopg.connect(**execution_authority_values),
         "store": lambda: PostgresDurableEffectStore(
             connect=lambda: psycopg.connect(**app_values),
             privileged_connect=lambda: psycopg.connect(**writer_values),
@@ -234,19 +182,12 @@ def postgres_connections(postgres_server: dict[str, str], tmp_path: Path):
     cleanup.autocommit = True
     with cleanup.cursor() as cursor:
         cursor.execute(
-            "DELETE FROM gah_runtime_principals "
-            "WHERE database_role IN "
-            "('gah_app', 'gah_writer', 'gah_skill_authority', 'gah_execution_authority')"
+            "DELETE FROM gah_runtime_principals WHERE database_role IN ('gah_app', 'gah_writer')"
         )
         cursor.execute("REVOKE gah_runtime FROM gah_app")
         cursor.execute("REVOKE gah_authority_writer FROM gah_writer")
-        cursor.execute("REVOKE gah_authority_writer FROM gah_skill_authority")
-        cursor.execute("REVOKE gah_skill_lifecycle_authority FROM gah_skill_authority")
-        cursor.execute("REVOKE gah_execution_admission_authority FROM gah_execution_authority")
         cursor.execute("DROP ROLE IF EXISTS gah_app")
         cursor.execute("DROP ROLE IF EXISTS gah_writer")
-        cursor.execute("DROP ROLE IF EXISTS gah_skill_authority")
-        cursor.execute("DROP ROLE IF EXISTS gah_execution_authority")
     cleanup.close()
 
 

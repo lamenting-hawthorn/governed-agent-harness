@@ -62,29 +62,9 @@ PostgreSQL gate proves that:
 - canonical evidence append and authoritative revision persistence are atomic,
   while projections remain rebuildable and never become authorization truth.
 
-The bounded inert-skill Phase 4.4 gate now additionally requires actor-only
-proposal/evidence/gate/delivery/policy/approval bindings, immutable inline JSON
-artifact revisions, authority-only install and explicit lifecycle transitions,
-mutation-free replay, optimistic concurrency, canonical evidence, rebuildable
-active projection, restart equivalence, forced RLS, separated roles, and a
-runtime-only exact active-digest resolver. Evidence-writer and lifecycle
-credentials must also remain distinct, lifecycle changes must consume a live
-exact-command writer authorization, and opposing same-revision transitions
-must resolve through one atomic compare-and-swap without deadlock or partial
-evidence. Local real-PostgreSQL proof closes this bounded Phase 4 gate only;
-executable skills, archives, dependency solving, distribution, sandboxing,
-hosted operations, and production readiness remain deferred.
-
-The bounded Phase 5.1 gate additionally requires exact active-digest resolution,
-schema-valid request and authority binding, single-use expiry, a static
-preinstalled no-I/O handler, intent-before-invocation evidence, canonical
-terminal outcome evidence, mutation-free replay/rejection, one-winner
-concurrency, expired-lease recovery without retry, ledger-derived projection
-rebuild that rejects poisoned execution events, distinct live-commitment
-admission/evidence-writer credentials, forced RLS, fixed `SECURITY DEFINER`
-search paths, and zero direct runtime table DML. It does not approve arbitrary
-skill execution, sandboxing, transports, providers, hosted operation, staging,
-or production.
+Durable skills remain a separate Phase 4 deliverable. Before Phase 5 starts,
+skills must either pass their own lifecycle/integrity/restart gate or be removed
+from the Phase 4 completion boundary by an explicit reviewed roadmap change.
 
 ## First usable release gate
 
