@@ -1324,12 +1324,17 @@ def test_execution_issuance_and_skill_deactivation_have_no_deadlock_or_partial_s
 
     outcomes = (issue_result, deactivate_result)
     errors = [value for kind, value in outcomes if kind.endswith("error")]
+
+    def error_diagnostic(error: Exception) -> str:
+        sqlstate = getattr(error, "sqlstate", None) or getattr(error, "pgcode", None)
+        return f"{type(error).__name__}(sqlstate={sqlstate!r}): {error}"
+
     assert not any(
         "deadlock detected" in str(error)
         or "lock timeout" in str(error)
         or "statement timeout" in str(error)
         for error in errors
-    )
+    ), [error_diagnostic(error) for error in errors]
     assert deactivate_result[0] == "deactivated", deactivate_result[1]
     assert issue_result[0] in {"issued", "issue_error"}
     if issue_result[0] == "issue_error":
@@ -1378,6 +1383,101 @@ def test_execution_issuance_and_skill_deactivation_have_no_deadlock_or_partial_s
         assert state_count == issuance_count == 1
     else:
         assert state_count == issuance_count == 0
+
+
+def test_execution_issuance_takes_skill_lock_before_waiting_on_active_projection(
+    postgres_connections,
+):
+    """The execution issuer owns the lifecycle skill lock before its row lock waits.
+
+    Holding the active projection row makes the ordering externally observable:
+    once issuance is blocked on that row, another transaction must be unable to
+    acquire the same skill advisory lock.  The old implementation took the row
+    lock during validation before acquiring the skill lock, so this proof fails
+    against it without relying on an arbitrary sleep.
+    """
+
+    actor, skill = _persisted_skill(postgres_connections)
+    command = _execution_command(actor, skill, operation_id="phase5-lock-order-proof")
+    authority = _authority(postgres_connections)
+    issued = threading.Event()
+
+    def issue():
+        try:
+            result = authority.issue(actor_context=actor, command=command)
+            issued.set()
+            return result
+        except Exception as error:  # Returned below so the proof keeps its diagnostic.
+            return error
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with (
+            postgres_connections["admin"]() as holder_connection,
+            holder_connection.cursor() as holder_cursor,
+        ):
+            holder_cursor.execute(
+                "SELECT 1 FROM gah_active_skill_projection "
+                "WHERE tenant_id=%s AND actor_id=%s AND skill_id=%s FOR UPDATE",
+                (actor["tenant_id"], actor["actor_id"], command["skill_id"]),
+            )
+            assert holder_cursor.fetchone() == (1,)
+            future = pool.submit(issue)
+            deadline = time.monotonic() + 5
+            blocked_on_active_projection = False
+            while time.monotonic() < deadline:
+                with (
+                    postgres_connections["admin"]() as observer_connection,
+                    observer_connection.cursor() as observer_cursor,
+                ):
+                    observer_cursor.execute(
+                        "SELECT EXISTS ("
+                        "SELECT 1 FROM pg_stat_activity "
+                        "WHERE usename='gah_execution_authority' "
+                        "AND wait_event_type='Lock' "
+                        "AND query LIKE 'SELECT gah_issue_builtin_execution_authorization%'"
+                        ")"
+                    )
+                    blocked_on_active_projection = observer_cursor.fetchone()[0]
+                if blocked_on_active_projection:
+                    break
+                time.sleep(0.01)
+            assert blocked_on_active_projection, "issuance never blocked on the held projection row"
+            assert not issued.is_set()
+            with (
+                postgres_connections["admin"]() as contender_connection,
+                contender_connection.cursor() as contender_cursor,
+            ):
+                contender_cursor.execute(
+                    "SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"skill:{actor['tenant_id']}:{actor['actor_id']}:{command['skill_id']}",),
+                )
+                assert contender_cursor.fetchone() == (False,)
+        result = future.result(timeout=8)
+
+    assert not isinstance(result, Exception), result
+    assert result.replayed is False
+
+
+def test_lock_order_internal_issuer_is_not_an_authority_entrypoint(postgres_connections):
+    """Only admission authority can call the ordered public issuer wrapper."""
+
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT "
+            "has_function_privilege('gah_execution_authority', "
+            "'gah_issue_builtin_execution_authorization(jsonb,jsonb,jsonb,jsonb,jsonb)', "
+            "'EXECUTE'), "
+            "has_function_privilege('gah_app', "
+            "'gah_issue_builtin_execution_authorization(jsonb,jsonb,jsonb,jsonb,jsonb)', "
+            "'EXECUTE'), "
+            "has_function_privilege('gah_execution_authority', "
+            "'gah_issue_builtin_execution_authorization_locked(jsonb,jsonb,jsonb,jsonb,jsonb)', "
+            "'EXECUTE'), "
+            "has_function_privilege('public', "
+            "'gah_issue_builtin_execution_authorization_locked(jsonb,jsonb,jsonb,jsonb,jsonb)', "
+            "'EXECUTE')"
+        )
+        assert cursor.fetchone() == (True, False, False, False)
 
 
 def test_concurrent_consume_has_one_handler_winner(postgres_connections):

@@ -673,10 +673,15 @@ def validate_skill_lifecycle_command(
             ):
                 raise SemanticError("skill approval is not currently valid")
             assert approval_verifier is not None and approval_trust is not None
+            trust = approval_trust(now)
+            if not isinstance(trust, TrustContext) or trust.now != now:
+                raise SemanticError(
+                    "skill approval trust context does not match the requested time"
+                )
             verify_signed_record(
                 approval,
                 verifier=approval_verifier,
-                trust=approval_trust(now),
+                trust=trust,
                 expected_tenant=actor["tenant_id"],
             )
     if (
@@ -729,10 +734,15 @@ def validate_skill_lifecycle_command(
         if now is not None:
             if receipt_verifier is None or receipt_trust is None:
                 raise SemanticError("runtime receipt verification is not configured")
+            trust = receipt_trust(now)
+            if not isinstance(trust, TrustContext) or trust.now != now:
+                raise SemanticError(
+                    "runtime receipt trust context does not match the requested time"
+                )
             verify_runtime_receipt(
                 receipt,
                 verifier=receipt_verifier,
-                trust=receipt_trust(now),
+                trust=trust,
                 expected_tenant=actor["tenant_id"],
             )
         validate_activation_delivery_binding(receipt, delivery)
@@ -754,11 +764,16 @@ def validate_skill_lifecycle_command(
         if now is not None:
             if receipt_verifier is None or receipt_trust is None:
                 raise SemanticError("runtime receipt verification is not configured")
+            trust = receipt_trust(now)
+            if not isinstance(trust, TrustContext) or trust.now != now:
+                raise SemanticError(
+                    "runtime receipt trust context does not match the requested time"
+                )
             validate_rollback_lifecycle(
                 receipt,
                 activation,
                 verifier=receipt_verifier,
-                trust=receipt_trust(now),
+                trust=trust,
                 expected_tenant=actor["tenant_id"],
             )
         validate_rollback_activation_binding(receipt, activation)

@@ -18,6 +18,7 @@ from governed_agent_harness.contracts import (
     sha256_digest,
     verify_runtime_receipt,
 )
+from governed_agent_harness.contracts.errors import SemanticError
 from governed_agent_harness.contracts.positive_fixtures import build_positive_records
 from governed_agent_harness.persistence import (
     PostgresActiveSkillResolver,
@@ -412,6 +413,83 @@ def test_exact_approval_required_replay_survives_approval_expiry(postgres_connec
     changed["retention"]["expires_at"] = "2027-06-01T00:00:00.000Z"
     with pytest.raises(Exception, match="replay conflicts"):
         authority.install_skill(actor_context=actor, **changed)
+    assert _skill_authority_snapshot(postgres_connections) == before
+
+
+def test_current_approval_rejects_backdated_trust_context_without_mutation(
+    postgres_connections,
+):
+    actor, command = _persisted_command(postgres_connections)
+    policy = command["policy_decision"]
+    policy["decision"] = "require_approval"
+    apply_object_digest(policy)
+    approval = copy.deepcopy(build_positive_records()["approval_record"])
+    approval.update(
+        {
+            "tenant_id": actor["tenant_id"],
+            "request_id": command["skill_proposal"]["proposal_id"],
+            "request_digest": command["skill_proposal"]["proposal_digest"],
+            "policy_decision_id": policy["decision_id"],
+            "policy_decision_digest": policy["decision_digest"],
+            "constraints": copy.deepcopy(policy["constraints"]),
+            "expires_at": "2027-01-01T00:00:00.000Z",
+        }
+    )
+    apply_object_digest(approval)
+    command["approvals"] = [approval]
+    delivery = command["delivery_envelope"]
+    delivery["policy_refs"] = [
+        ref("policy_decision", policy["decision_id"], policy["decision_digest"])
+    ]
+    delivery["reviewer_refs"] = [
+        ref("approval_record", approval["approval_id"], approval["approval_digest"])
+    ]
+    apply_object_digest(delivery)
+    before = _skill_authority_snapshot(postgres_connections)
+
+    with pytest.raises(SemanticError, match="requested time"):
+        PostgresSkillLifecycleAuthority(
+            privileged_connect=postgres_connections["skill_authority"],
+            evidence_writer_connect=postgres_connections["writer"],
+            clock=lambda: NOW,
+            ids=_ids(),
+            approval_verifier=_AcceptingVerifier(),
+            approval_trust=lambda _now: _approval_trust(NOW - timedelta(milliseconds=1)),
+        ).install_skill(actor_context=actor, **command)
+
+    assert _skill_authority_snapshot(postgres_connections) == before
+
+
+def test_current_receipt_rejects_backdated_trust_context_without_mutation(
+    postgres_connections,
+):
+    actor, install = _persisted_command(postgres_connections)
+    PostgresSkillLifecycleAuthority(
+        privileged_connect=postgres_connections["skill_authority"],
+        evidence_writer_connect=postgres_connections["writer"],
+        clock=lambda: RECEIPT_NOW,
+        ids=_ids(),
+    ).install_skill(actor_context=actor, **install)
+    activate = copy.deepcopy(install)
+    activate.update(
+        {
+            "operation_id": "stale-receipt-trust-context",
+            "expected_revision": 1,
+            "activation_receipt": _activation_receipt(install),
+        }
+    )
+    before = _skill_authority_snapshot(postgres_connections)
+
+    with pytest.raises(SemanticError, match="requested time"):
+        PostgresSkillLifecycleAuthority(
+            privileged_connect=postgres_connections["skill_authority"],
+            evidence_writer_connect=postgres_connections["writer"],
+            clock=lambda: RECEIPT_NOW,
+            ids=_ids(),
+            receipt_verifier=_AcceptingVerifier(),
+            receipt_trust=lambda _now: _receipt_trust(RECEIPT_NOW - timedelta(milliseconds=1)),
+        ).activate_skill(actor_context=actor, **activate)
+
     assert _skill_authority_snapshot(postgres_connections) == before
 
 
@@ -1664,7 +1742,7 @@ def test_direct_lifecycle_sql_rejects_tampered_approval_digest_without_mutation(
 def test_forged_authority_sql_is_rejected_without_ledger_or_projection_mutation(
     postgres_connections,
 ):
-    """A generic writer may append evidence, but cannot turn it into lifecycle state."""
+    """A generic writer can neither forge lifecycle evidence nor lifecycle state."""
 
     actor, command = _persisted_command(postgres_connections)
     wire = build_skill_lifecycle_wire_command("install", command)
@@ -1675,25 +1753,33 @@ def test_forged_authority_sql_is_rejected_without_ledger_or_projection_mutation(
         "skill_id": wire["skill_proposal"]["artifact_id"],
         "command": wire,
     }
-    with postgres_connections["writer"]() as connection, connection.cursor() as cursor:
-        forged_evidence = postgres_connections["store_at"](NOW)._append_evidence(
-            cursor=cursor,
-            actor=actor,
-            run_id=actor["session_id"],
-            event_kind="skill.lifecycle_transition",
-            policy_ref={
-                "record_type": "policy_decision",
-                "record_id": command["policy_decision"]["decision_id"],
-                "record_digest": command["policy_decision"]["decision_digest"],
-            },
-            payload=ledger_payload,
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT (SELECT count(*) FROM gah_evidence_events), "
+            "(SELECT count(*) FROM gah_skill_lifecycle_transitions), "
+            "(SELECT count(*) FROM gah_active_skill_projection)"
         )
-    forged = {**wire, "transition_evidence": forged_evidence}
+        before = cursor.fetchone()
+    with postgres_connections["writer"]() as connection, connection.cursor() as cursor:
+        with pytest.raises(Exception, match="reserved evidence event kind"):
+            postgres_connections["store_at"](NOW)._append_evidence(
+                cursor=cursor,
+                actor=actor,
+                run_id=actor["session_id"],
+                event_kind="skill.lifecycle_transition",
+                policy_ref={
+                    "record_type": "policy_decision",
+                    "record_id": command["policy_decision"]["decision_id"],
+                    "record_digest": command["policy_decision"]["decision_digest"],
+                },
+                payload=ledger_payload,
+            )
+        connection.rollback()
     with postgres_connections["writer"]() as connection, connection.cursor() as cursor:
         with pytest.raises(Exception, match="permission denied"):
             cursor.execute(
                 "SELECT gah_install_skill(%s::jsonb, %s::jsonb)",
-                (json.dumps(actor), json.dumps(forged)),
+                (json.dumps(actor), json.dumps(wire)),
             )
         connection.rollback()
     with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
@@ -1702,9 +1788,7 @@ def test_forged_authority_sql_is_rejected_without_ledger_or_projection_mutation(
             "(SELECT count(*) FROM gah_skill_lifecycle_transitions), "
             "(SELECT count(*) FROM gah_active_skill_projection)"
         )
-        evidence, transitions, projection = cursor.fetchone()
-        assert evidence == 2
-        assert transitions == projection == 0
+        assert cursor.fetchone() == before
 
 
 def test_concurrent_lifecycle_apply_replays_without_extra_evidence(
