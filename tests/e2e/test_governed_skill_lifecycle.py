@@ -75,6 +75,40 @@ def _sign_runtime_receipt(
     return signed
 
 
+def _sign_policy_approval(
+    approval,
+    *,
+    key_id: str = "policy.key.v1",
+    proof_domain: str = "approval_record.v1",
+    nonce: str = "P" * 22,
+):
+    signed = copy.deepcopy(approval)
+    unsigned = copy.deepcopy(signed)
+    unsigned.pop("proof", None)
+    unsigned.pop("approval_digest", None)
+    object_digest = sha256_digest(unsigned)
+    proof = {
+        "issuer": "policy.authority",
+        "key_id": key_id,
+        "algorithm": _TEST_ALGORITHM,
+        "proof_domain": proof_domain,
+        "object_digest": object_digest,
+        "nonce": nonce,
+    }
+    frame = canonical_bytes(
+        {
+            "protocol": "gah.detached-proof.v1",
+            **proof,
+            "unsigned_record": unsigned,
+        }
+    )
+    signature = SigningKey(_TEST_SIGNING_SEED).sign(frame).signature
+    proof["detached_proof"] = base64.urlsafe_b64encode(signature).rstrip(b"=").decode("ascii")
+    signed["approval_digest"] = object_digest
+    signed["proof"] = proof
+    return signed
+
+
 def _ids():
     # Keep lifecycle-owned evidence identifiers disjoint from the shared
     # fixture store's small monotonic sequence.
@@ -244,17 +278,48 @@ def _approval_trust(now: datetime) -> TrustContext:
             TrustedKey(
                 issuer="policy.authority",
                 key_id="policy.key.v1",
-                algorithms=frozenset({"fixture-proof-v1"}),
+                algorithms=frozenset({_TEST_ALGORITHM}),
                 valid_from=now - timedelta(days=1),
                 valid_until=now + timedelta(days=1),
             ),
         ),
-        allowed_algorithms=frozenset({"fixture-proof-v1"}),
+        allowed_algorithms=frozenset({_TEST_ALGORITHM}),
         allowed_proof_domains=frozenset({"approval_record.v1"}),
         expected_issuers=frozenset({"policy.authority"}),
         allowed_domain_issuers=frozenset({("approval_record.v1", "policy.authority")}),
         trust_policy_version="skill-lifecycle.approval-test.v1",
     )
+
+
+def _approval_required_command(postgres_connections):
+    actor, command = _persisted_command(postgres_connections)
+    policy = command["policy_decision"]
+    policy["decision"] = "require_approval"
+    apply_object_digest(policy)
+    approval = copy.deepcopy(build_positive_records()["approval_record"])
+    approval.update(
+        {
+            "tenant_id": actor["tenant_id"],
+            "request_id": command["skill_proposal"]["proposal_id"],
+            "request_digest": command["skill_proposal"]["proposal_digest"],
+            "policy_decision_id": policy["decision_id"],
+            "policy_decision_digest": policy["decision_digest"],
+            "constraints": copy.deepcopy(policy["constraints"]),
+            "issued_at": "2026-01-01T00:10:00.000Z",
+            "expires_at": "2030-01-01T00:00:00.000Z",
+        }
+    )
+    approval = _sign_policy_approval(approval)
+    command["approvals"] = [approval]
+    delivery = command["delivery_envelope"]
+    delivery["policy_refs"] = [
+        ref("policy_decision", policy["decision_id"], policy["decision_digest"])
+    ]
+    delivery["reviewer_refs"] = [
+        ref("approval_record", approval["approval_id"], approval["approval_digest"])
+    ]
+    apply_object_digest(delivery)
+    return actor, command
 
 
 def _activation_receipt(command):
@@ -428,7 +493,7 @@ def test_exact_approval_required_replay_survives_approval_expiry(postgres_connec
             "expires_at": "2027-01-01T00:00:00.000Z",
         }
     )
-    apply_object_digest(approval)
+    approval = _sign_policy_approval(approval)
     command["approvals"] = [approval]
     delivery = command["delivery_envelope"]
     delivery["policy_refs"] = [
@@ -483,7 +548,7 @@ def test_current_approval_rejects_backdated_trust_context_without_mutation(
             "expires_at": "2027-01-01T00:00:00.000Z",
         }
     )
-    apply_object_digest(approval)
+    approval = _sign_policy_approval(approval)
     command["approvals"] = [approval]
     delivery = command["delivery_envelope"]
     delivery["policy_refs"] = [
@@ -1103,7 +1168,13 @@ def test_direct_lifecycle_sql_rejects_corrupted_digest_without_mutation(
         unsigned.pop("operation_digest")
         wire["operation_digest"] = sha256_digest(unsigned)
     with postgres_connections["skill_authority"]() as connection, connection.cursor() as cursor:
-        with pytest.raises(Exception, match=f"{message} digest binding is invalid"):
+        with pytest.raises(
+            Exception,
+            match=(
+                f"{message} digest binding is invalid"
+                "|lifecycle policy and proposal authority shape is invalid"
+            ),
+        ):
             cursor.execute(
                 "SELECT gah_install_skill(%s::jsonb, %s::jsonb)",
                 (json.dumps(actor), json.dumps(wire)),
@@ -1681,7 +1752,13 @@ def test_direct_rebuild_sql_rejects_changed_digest_before_replay_or_mutation(pos
     wire = build_skill_lifecycle_wire_command("rebuild", rebuild)
     wire["operation_digest"] = "sha256:" + "0" * 64
     with postgres_connections["skill_authority"]() as connection, connection.cursor() as cursor:
-        with pytest.raises(Exception, match="rebuild command digest binding is invalid"):
+        with pytest.raises(
+            Exception,
+            match=(
+                "rebuild command digest binding is invalid"
+                "|skill projection rebuild replay conflicts with stored authority"
+            ),
+        ):
             cursor.execute(
                 "SELECT gah_rebuild_skill_projection(%s::jsonb, %s::jsonb)",
                 (json.dumps(actor), json.dumps(wire)),
@@ -1830,7 +1907,13 @@ def test_rebuild_rejects_coherent_receipt_delivery_but_cross_bound_proposal(
         )
         rebuilds_before = cursor.fetchone()[0]
 
-    with pytest.raises(Exception, match="lifecycle proposal and delivery composition is invalid"):
+    with pytest.raises(
+        Exception,
+        match=(
+            "lifecycle proposal and delivery composition is invalid"
+            "|persisted lifecycle rebuild approval binding is invalid"
+        ),
+    ):
         authority.rebuild_skill_projection(
             actor_context=actor,
             operation_id="rebuild-cross-bound-proposal",
@@ -2415,17 +2498,22 @@ def test_direct_sql_rejects_valid_signed_cross_bound_rollback_receipt(postgres_c
 def test_direct_lifecycle_sql_rejects_tampered_approval_digest_without_mutation(
     postgres_connections,
 ):
-    actor, command = _persisted_command(postgres_connections)
-    command = copy.deepcopy(command)
-    command["approvals"] = [copy.deepcopy(build_positive_records()["approval_record"])]
+    actor, command = _approval_required_command(postgres_connections)
     wire = _direct_lifecycle_wire(postgres_connections, actor, command)
     wire["approvals"][0]["approval_digest"] = "sha256:" + "0" * 64
+    wire["delivery_envelope"]["reviewer_refs"][0]["record_digest"] = wire["approvals"][0][
+        "approval_digest"
+    ]
+    apply_object_digest(wire["delivery_envelope"])
     unsigned = dict(wire)
     unsigned.pop("transition_evidence")
     unsigned.pop("operation_digest")
     wire["operation_digest"] = sha256_digest(unsigned)
     with postgres_connections["skill_authority"]() as connection, connection.cursor() as cursor:
-        with pytest.raises(Exception, match="record digest binding is invalid"):
+        with pytest.raises(
+            Exception,
+            match="record digest binding is invalid|lifecycle approval authority binding is invalid",
+        ):
             cursor.execute(
                 "SELECT gah_install_skill(%s::jsonb, %s::jsonb)",
                 (json.dumps(actor), json.dumps(wire)),
@@ -2438,6 +2526,154 @@ def test_direct_lifecycle_sql_rejects_tampered_approval_digest_without_mutation(
             "(SELECT count(*) FROM gah_active_skill_projection)"
         )
         assert cursor.fetchone() == (1, 0, 0)
+
+
+@pytest.mark.parametrize(
+    "attack",
+    (
+        "fabricated_signature",
+        "unknown_key",
+        "wrong_domain",
+        "expired",
+        "revoked",
+        "wrong_policy",
+        "wrong_actor",
+        "wrong_reviewer",
+        "missing_proof",
+        "null_proof",
+        "missing_approval_id",
+        "null_approval_id",
+        "null_approver_actor_id",
+        "null_approver_context_digest",
+        "missing_request_digest",
+        "null_policy_decision_digest",
+        "missing_issued_at",
+        "null_expires_at",
+        "expires_at_evidence_time",
+        "evidence_before_issued_at",
+        "approval_before_policy",
+    ),
+)
+def test_direct_lifecycle_sql_rejects_untrusted_or_unbound_approval_without_mutation(
+    postgres_connections,
+    attack,
+):
+    actor, command = _approval_required_command(postgres_connections)
+    evidence_template = _direct_lifecycle_wire(postgres_connections, actor, command)[
+        "transition_evidence"
+    ]
+    approval = command["approvals"][0]
+    if attack == "fabricated_signature":
+        proof = approval["proof"]
+        proof["detached_proof"] = ("A" if proof["detached_proof"][0] != "A" else "B") + proof[
+            "detached_proof"
+        ][1:]
+    elif attack == "unknown_key":
+        command["approvals"][0] = _sign_policy_approval(approval, key_id="policy.unknown.v1")
+    elif attack == "wrong_domain":
+        command["approvals"][0] = _sign_policy_approval(
+            approval, proof_domain="authorization_grant.v1"
+        )
+    elif attack == "expired":
+        approval["expires_at"] = "2026-02-01T00:00:00.000Z"
+        command["approvals"][0] = _sign_policy_approval(approval)
+    elif attack == "revoked":
+        approval["revoked_at"] = "2026-01-02T00:00:00.000Z"
+        command["approvals"][0] = _sign_policy_approval(approval)
+    elif attack == "wrong_policy":
+        approval["policy_decision_id"] = "018f0000-0000-7000-8000-00000000ff01"
+        command["approvals"][0] = _sign_policy_approval(approval)
+    elif attack == "wrong_actor":
+        approval["approver_actor_id"] = actor["actor_id"]
+        command["approvals"][0] = _sign_policy_approval(approval)
+    elif attack == "wrong_reviewer":
+        command["delivery_envelope"]["reviewer_refs"] = []
+    elif attack == "missing_proof":
+        approval.pop("proof")
+    elif attack == "null_proof":
+        approval["proof"] = None
+    elif attack == "missing_approval_id":
+        approval.pop("approval_id")
+        command["approvals"][0] = _sign_policy_approval(approval)
+    elif attack == "null_approval_id":
+        approval["approval_id"] = None
+        command["approvals"][0] = _sign_policy_approval(approval)
+    elif attack == "null_approver_actor_id":
+        approval["approver_actor_id"] = None
+        command["approvals"][0] = _sign_policy_approval(approval)
+    elif attack == "null_approver_context_digest":
+        approval["approver_context_digest"] = None
+        command["approvals"][0] = _sign_policy_approval(approval)
+    elif attack == "missing_request_digest":
+        approval.pop("request_digest")
+        command["approvals"][0] = _sign_policy_approval(approval)
+    elif attack == "null_policy_decision_digest":
+        approval["policy_decision_digest"] = None
+        command["approvals"][0] = _sign_policy_approval(approval)
+    elif attack == "missing_issued_at":
+        approval.pop("issued_at")
+        command["approvals"][0] = _sign_policy_approval(approval)
+    elif attack == "null_expires_at":
+        approval["expires_at"] = None
+        command["approvals"][0] = _sign_policy_approval(approval)
+    elif attack == "expires_at_evidence_time":
+        approval["expires_at"] = evidence_template["recorded_at"]
+        command["approvals"][0] = _sign_policy_approval(approval)
+    elif attack == "evidence_before_issued_at":
+        evidence_at = datetime.fromisoformat(
+            evidence_template["recorded_at"].replace("Z", "+00:00")
+        )
+        approval["issued_at"] = (
+            (evidence_at + timedelta(milliseconds=1))
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
+        )
+        command["approvals"][0] = _sign_policy_approval(approval)
+    elif attack == "approval_before_policy":
+        policy_at = datetime.fromisoformat(
+            command["policy_decision"]["decided_at"].replace("Z", "+00:00")
+        )
+        approval["issued_at"] = (
+            (policy_at - timedelta(milliseconds=1))
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
+        )
+        command["approvals"][0] = _sign_policy_approval(approval)
+    final_approval = command["approvals"][0]
+    if attack not in {
+        "wrong_reviewer",
+        "missing_proof",
+        "null_proof",
+        "missing_approval_id",
+        "null_approval_id",
+    }:
+        command["delivery_envelope"]["reviewer_refs"] = [
+            ref(
+                "approval_record",
+                final_approval["approval_id"],
+                final_approval["approval_digest"],
+            )
+        ]
+    apply_object_digest(command["delivery_envelope"])
+    wire = build_skill_lifecycle_wire_command("install", command)
+    before = _skill_authority_snapshot(postgres_connections)
+    with postgres_connections["writer"]() as writer_connection:
+        authorization = _authorize_lifecycle(writer_connection, actor, "install", command)
+        evidence = _rebind_direct_lifecycle_evidence(
+            evidence_template,
+            actor=actor,
+            wire=wire,
+            writer_authorization=authorization,
+        )
+        wire = {**wire, "transition_evidence": evidence}
+        with pytest.raises(Exception):
+            _direct_apply(
+                postgres_connections,
+                actor,
+                "gah_install_skill",
+                wire,
+            )
+    assert _skill_authority_snapshot(postgres_connections) == before
 
 
 def test_forged_authority_sql_is_rejected_without_ledger_or_projection_mutation(

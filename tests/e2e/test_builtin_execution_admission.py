@@ -34,6 +34,7 @@ from governed_agent_harness.persistence import (
     ExecutionAuthorization,
     PostgresActiveSkillResolver,
     PostgresBuiltinExecutionRuntime,
+    PostgresDurableEffectStore,
     PostgresExecutionAdmissionAuthority,
     PostgresSkillLifecycleAuthority,
     execution_operation_digest,
@@ -243,13 +244,38 @@ def _persisted_skill(
     *,
     retention_expires_at: str | None = None,
     actor_expires_at: str = "2030-01-01T00:00:00.000Z",
+    actor_id: str | None = None,
+    session_id: str | None = None,
+    provision: bool = False,
+    database_roles: tuple[str, ...] = (
+        "gah_app",
+        "gah_writer",
+        "gah_skill_authority",
+        "gah_execution_authority",
+    ),
 ):
     actor, command = build_skill_command()
     if retention_expires_at is not None:
         command["retention"]["expires_at"] = retention_expires_at
     actor["issued_at"] = "2026-01-01T00:00:00.000Z"
     actor["expires_at"] = actor_expires_at
+    if actor_id is not None:
+        actor["actor_id"] = actor_id
+    if session_id is not None:
+        actor["session_id"] = session_id
+        actor["correlation_id"] = session_id
+    if provision:
+        import psycopg
+
+        with postgres_connections["admin"]() as connection:
+            dsn = connection.info.dsn
+        PostgresDurableEffectStore.provision_principal(
+            admin_connect=lambda: psycopg.connect(dsn),
+            database_roles=database_roles,
+            actor_context=actor,
+        )
     target_scope = command["skill_proposal"]["target_scope"]
+    target_scope["actor_id"] = actor["actor_id"]
     target_scope["parent_digest"] = sha256_digest(actor)
     target_scope["valid_until"] = actor["expires_at"]
     command["gate_decision"]["target_scope"] = copy.deepcopy(target_scope)
@@ -558,6 +584,34 @@ def _snapshot(postgres_connections):
         )
         trust_keys = cursor.fetchall()
     return state, evidence, run_heads, trust_keys
+
+
+def _drop_execution_binding_guard(cursor):
+    cursor.execute(
+        "ALTER TABLE gah_builtin_execution_state "
+        "DROP CONSTRAINT gah_builtin_execution_state_actor_binding_guard"
+    )
+
+
+def _restore_execution_binding_guard(cursor):
+    cursor.execute(
+        "ALTER TABLE gah_builtin_execution_state "
+        "ADD CONSTRAINT gah_builtin_execution_state_actor_binding_guard "
+        "CHECK (gah_builtin_execution_state_actor_binding_valid("
+        "tenant_id,actor_id,run_id,operation_id,operation_digest,"
+        "request_id,request_digest,grant_id,grant_digest,skill_id,revision,"
+        "artifact_digest,command_json,grant_json,issuance_evidence_json"
+        ") IS TRUE)"
+    )
+
+
+def _execution_binding_guard_exists(cursor):
+    cursor.execute(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint "
+        "WHERE conrelid='gah_builtin_execution_state'::regclass "
+        "AND conname='gah_builtin_execution_state_actor_binding_guard')"
+    )
+    return cursor.fetchone()[0]
 
 
 def _direct_issue(
@@ -918,33 +972,62 @@ def test_exact_authorization_replay_rejects_admin_poisoned_revoked_approval(
     actor, skill = _persisted_skill(postgres_connections)
     command = _execution_command(actor, skill, operation_id="phase5-poisoned-revoked-replay")
     _authority(postgres_connections).issue(actor_context=actor, command=command)
-    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
-        cursor.execute(
-            "UPDATE gah_builtin_execution_state SET command_json=jsonb_set("
-            "command_json,'{approvals,0,revoked_at}',to_jsonb(%s::text)) "
-            "WHERE tenant_id=%s AND actor_id=%s AND operation_id=%s "
-            "RETURNING command_json",
-            (
-                _ts(NOW - timedelta(seconds=1)),
-                actor["tenant_id"],
-                actor["actor_id"],
-                command["operation_id"],
-            ),
-        )
-        poisoned_command = cursor.fetchone()[0]
-    before = _snapshot(postgres_connections)
-
-    with (
-        postgres_connections["execution_authority"]() as connection,
-        connection.cursor() as cursor,
-    ):
-        with pytest.raises(Exception, match="persisted execution approval is revoked or malformed"):
+    try:
+        with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+            _drop_execution_binding_guard(cursor)
             cursor.execute(
-                "SELECT gah_lookup_builtin_execution_authorization(%s::jsonb,%s::jsonb)",
-                (execution_module._json(actor), execution_module._json(poisoned_command)),
+                "SELECT command_json FROM gah_builtin_execution_state "
+                "WHERE tenant_id=%s AND actor_id=%s AND operation_id=%s",
+                (
+                    actor["tenant_id"],
+                    actor["actor_id"],
+                    command["operation_id"],
+                ),
             )
-
-    assert _snapshot(postgres_connections) == before
+            original_command = cursor.fetchone()[0]
+            cursor.execute(
+                "UPDATE gah_builtin_execution_state SET command_json=jsonb_set("
+                "command_json,'{approvals,0,revoked_at}',to_jsonb(%s::text)) "
+                "WHERE tenant_id=%s AND actor_id=%s AND operation_id=%s "
+                "RETURNING command_json",
+                (
+                    _ts(NOW - timedelta(seconds=1)),
+                    actor["tenant_id"],
+                    actor["actor_id"],
+                    command["operation_id"],
+                ),
+            )
+            poisoned_command = cursor.fetchone()[0]
+        before = _snapshot(postgres_connections)
+        with (
+            postgres_connections["execution_authority"]() as connection,
+            connection.cursor() as cursor,
+        ):
+            with pytest.raises(
+                Exception, match="persisted execution approval is revoked or malformed"
+            ):
+                cursor.execute(
+                    "SELECT gah_lookup_builtin_execution_authorization(%s::jsonb,%s::jsonb)",
+                    (
+                        execution_module._json(actor),
+                        execution_module._json(poisoned_command),
+                    ),
+                )
+        assert _snapshot(postgres_connections) == before
+    finally:
+        with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+            if not _execution_binding_guard_exists(cursor):
+                cursor.execute(
+                    "UPDATE gah_builtin_execution_state SET command_json=%s::jsonb "
+                    "WHERE tenant_id=%s AND actor_id=%s AND operation_id=%s",
+                    (
+                        json.dumps(original_command),
+                        actor["tenant_id"],
+                        actor["actor_id"],
+                        command["operation_id"],
+                    ),
+                )
+                _restore_execution_binding_guard(cursor)
 
 
 def test_recovery_requires_intent_and_leaves_authorization_consumable(
@@ -1594,6 +1677,126 @@ def test_cross_actor_or_tenant_resolution_is_zero_mutation(postgres_connections,
     assert _counts(postgres_connections) == before
 
 
+def test_same_tenant_actors_independently_issue_and_execute_identical_identifiers(
+    postgres_connections,
+):
+    import psycopg
+    from psycopg import sql
+
+    actor_a, skill_a = _persisted_skill(postgres_connections)
+    with postgres_connections["admin"]() as connection:
+        parameters = connection.info.get_parameters()
+    suffix = f"{time.time_ns():x}"[-10:]
+    roles = {
+        name: f"gah_identity_{name}_{suffix}" for name in ("app", "writer", "skill", "execution")
+    }
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        for role in roles.values():
+            cursor.execute(
+                sql.SQL("CREATE ROLE {} LOGIN NOSUPERUSER NOBYPASSRLS INHERIT").format(
+                    sql.Identifier(role)
+                )
+            )
+        role_grants = (
+            ("app", "gah_runtime"),
+            ("writer", "gah_authority_writer"),
+            ("skill", "gah_skill_lifecycle_authority"),
+            ("execution", "gah_execution_admission_authority"),
+        )
+        for name, base_role in role_grants:
+            cursor.execute(
+                sql.SQL("GRANT {} TO {}").format(
+                    sql.Identifier(base_role), sql.Identifier(roles[name])
+                )
+            )
+
+    def role_connect(name):
+        return psycopg.connect(**{**parameters, "user": roles[name]})
+
+    actor_b_connections = {
+        **postgres_connections,
+        "app": lambda: role_connect("app"),
+        "writer": lambda: role_connect("writer"),
+        "skill_authority": lambda: role_connect("skill"),
+        "execution_authority": lambda: role_connect("execution"),
+        "store_at": lambda now: PostgresDurableEffectStore(
+            connect=lambda: role_connect("app"),
+            privileged_connect=lambda: role_connect("writer"),
+            clock=lambda: now,
+            ids=_ids(),
+        ),
+    }
+    try:
+        actor_b, skill_b = _persisted_skill(
+            actor_b_connections,
+            actor_id="018f0000-0000-7000-8000-0000000000a2",
+            session_id="018f0000-0000-7000-8000-0000000000b2",
+            provision=True,
+            database_roles=tuple(roles.values()),
+        )
+        command_a = _execution_command(actor_a, skill_a)
+        command_b = _execution_command(actor_b, skill_b)
+        assert command_a["operation_id"] == command_b["operation_id"]
+        assert command_a["tool_request"]["request_id"] == command_b["tool_request"]["request_id"]
+        assert (
+            command_a["tool_request"]["idempotency"]["operation_digest"]
+            == command_b["tool_request"]["idempotency"]["operation_digest"]
+        )
+        authorization_a = _authority(postgres_connections).issue(
+            actor_context=actor_a, command=command_a
+        )
+        authorization_b = _authority(actor_b_connections).issue(
+            actor_context=actor_b, command=command_b
+        )
+        assert authorization_a.grant["grant_id"] != authorization_b.grant["grant_id"]
+        result_a = PostgresBuiltinExecutionRuntime(
+            runtime_connect=postgres_connections["app"],
+            clock=lambda: NOW,
+            ids=_ids(),
+        ).invoke(actor_context=actor_a, authorization=authorization_a)
+        with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT actor_id,state FROM gah_builtin_execution_state "
+                "WHERE tenant_id=%s AND operation_id=%s ORDER BY actor_id",
+                (actor_a["tenant_id"], command_a["operation_id"]),
+            )
+            assert cursor.fetchall() == [
+                (actor_a["actor_id"], "completed"),
+                (actor_b["actor_id"], "authorized"),
+            ]
+        result_b = PostgresBuiltinExecutionRuntime(
+            runtime_connect=actor_b_connections["app"],
+            clock=lambda: NOW,
+            ids=_ids(),
+        ).invoke(actor_context=actor_b, authorization=authorization_b)
+
+        assert result_a.outcome["status"] == result_b.outcome["status"] == "succeeded"
+        with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT actor_id,state FROM gah_builtin_execution_state "
+                "WHERE tenant_id=%s AND operation_id=%s ORDER BY actor_id",
+                (actor_a["tenant_id"], command_a["operation_id"]),
+            )
+            assert cursor.fetchall() == [
+                (actor_a["actor_id"], "completed"),
+                (actor_b["actor_id"], "completed"),
+            ]
+    finally:
+        with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM gah_runtime_principals WHERE database_role = ANY(%s)",
+                (list(roles.values()),),
+            )
+            for name, base_role in role_grants:
+                cursor.execute(
+                    sql.SQL("REVOKE {} FROM {}").format(
+                        sql.Identifier(base_role), sql.Identifier(roles[name])
+                    )
+                )
+            for role in roles.values():
+                cursor.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
+
+
 def test_active_digest_change_after_issuance_is_zero_mutation(postgres_connections):
     actor, skill = _persisted_skill(postgres_connections)
     command = _execution_command(actor, skill)
@@ -1973,7 +2176,10 @@ def test_begin_waits_for_operation_before_skill_so_deactivate_cannot_deadlock(
     blocker_cursor = blocker.cursor()
     blocker_cursor.execute(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
-        (f"execution:operation:{actor['tenant_id']}:{command['operation_id']}",),
+        (
+            "execution:operation:"
+            f"{actor['tenant_id']}:{actor['actor_id']}:{command['operation_id']}",
+        ),
     )
 
     def begin():
@@ -3145,29 +3351,35 @@ def test_expired_authorization_and_crash_recovery_fail_closed(postgres_connectio
         expired_grant,
         authorization.issuance_evidence,
     )
-    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
-        cursor.execute(
-            "UPDATE gah_builtin_execution_state SET grant_json=%s::jsonb WHERE operation_id=%s",
-            (
-                json.dumps(expired_grant),
-                command["operation_id"],
-            ),
-        )
-    with pytest.raises(Exception, match="stale or expired"):
-        PostgresBuiltinExecutionRuntime(
-            runtime_connect=postgres_connections["app"],
-            clock=lambda: NOW,
-            ids=_ids(),
-        ).invoke(actor_context=actor, authorization=expired)
-    assert _counts(postgres_connections) == before
-    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
-        cursor.execute(
-            "UPDATE gah_builtin_execution_state SET grant_json=%s::jsonb WHERE operation_id=%s",
-            (
-                json.dumps(dict(authorization.grant)),
-                command["operation_id"],
-            ),
-        )
+    try:
+        with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+            _drop_execution_binding_guard(cursor)
+            cursor.execute(
+                "UPDATE gah_builtin_execution_state SET grant_json=%s::jsonb WHERE operation_id=%s",
+                (
+                    json.dumps(expired_grant),
+                    command["operation_id"],
+                ),
+            )
+        with pytest.raises(Exception, match="stale or expired"):
+            PostgresBuiltinExecutionRuntime(
+                runtime_connect=postgres_connections["app"],
+                clock=lambda: NOW,
+                ids=_ids(),
+            ).invoke(actor_context=actor, authorization=expired)
+        assert _counts(postgres_connections) == before
+    finally:
+        with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+            if not _execution_binding_guard_exists(cursor):
+                cursor.execute(
+                    "UPDATE gah_builtin_execution_state SET grant_json=%s::jsonb "
+                    "WHERE operation_id=%s",
+                    (
+                        json.dumps(dict(authorization.grant)),
+                        command["operation_id"],
+                    ),
+                )
+                _restore_execution_binding_guard(cursor)
 
     def crash(_registry, *, request):
         del request

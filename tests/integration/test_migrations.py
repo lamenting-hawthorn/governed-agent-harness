@@ -68,6 +68,7 @@ def test_packaged_migrations_are_contiguous_and_checksum_exact() -> None:
         (13, "0013_actor_scoped_skill_keys_and_evidence_reservation.sql"),
         (14, "0014_serialize_lifecycle_evidence_drafts.sql"),
         (15, "0015_verify_lifecycle_receipts_and_harden_execution.sql"),
+        (16, "0016_actor_scope_execution_and_verify_lifecycle_approvals.sql"),
     ]
     assert migrations[0].checksum.startswith("sha256:")
     assert len(migrations[0].checksum) == 71
@@ -125,8 +126,9 @@ def test_fresh_install_registers_migration_and_is_idempotent(
     assert all(table is not None for table in tables)
 
 
+@pytest.mark.parametrize("chronology_poison", (False, True), ids=("valid", "pre-policy"))
 def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
-    migration_database: dict[str, object], monkeypatch: pytest.MonkeyPatch
+    migration_database: dict[str, object], monkeypatch: pytest.MonkeyPatch, chronology_poison: bool
 ) -> None:
     """Apply 13 over a real 1--12 lifecycle row, not only an empty schema."""
 
@@ -225,6 +227,29 @@ def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
         receipt["proof"] = proof
         return receipt
 
+    def policy_approval(approval):
+        unsigned = copy.deepcopy(approval)
+        unsigned.pop("proof", None)
+        unsigned.pop("approval_digest", None)
+        digest = sha256_digest(unsigned)
+        proof = {
+            "issuer": "policy.authority",
+            "key_id": "policy.key.v1",
+            "algorithm": algorithm,
+            "proof_domain": "approval_record.v1",
+            "object_digest": digest,
+            "nonce": "P" * 22,
+        }
+        frame = canonical_bytes(
+            {"protocol": "gah.detached-proof.v1", **proof, "unsigned_record": unsigned}
+        )
+        proof["detached_proof"] = (
+            base64.urlsafe_b64encode(signing_key.sign(frame).signature).rstrip(b"=").decode("ascii")
+        )
+        approval["approval_digest"] = digest
+        approval["proof"] = proof
+        return approval
+
     connect = migration_database["connect"]
     packaged = discover_migrations()
     phase12 = tuple(migration for migration in packaged if migration.version <= 12)
@@ -270,6 +295,24 @@ def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
                     "2030-01-01T00:00:00.000Z",
                 ),
             )
+            if chronology_poison:
+                cursor.execute(
+                    "INSERT INTO gah_execution_proof_keys (issuer,key_id,algorithm,proof_domain,"
+                    "public_key,public_key_fingerprint,trust_policy_version,trust_policy_digest,"
+                    "valid_from,valid_until) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::timestamptz,%s::timestamptz)",
+                    (
+                        "policy.authority",
+                        "policy.key.v1",
+                        algorithm,
+                        "approval_record.v1",
+                        public_key,
+                        "sha256:" + sha256(public_key).hexdigest(),
+                        "upgrade-path.test.v1",
+                        "sha256:" + "2" * 64,
+                        "2020-01-01T00:00:00.000Z",
+                        "2030-01-01T00:00:00.000Z",
+                    ),
+                )
         # Seed real Phase 12 state through the then-current lifecycle path.
         # The current Python port calls the Phase 14 draft-lock helper, which
         # did not exist in that historical schema.  This test-only no-op is
@@ -351,6 +394,9 @@ def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
         apply_object_digest(proposal)
         policy = command["policy_decision"]
         policy["request_digest"] = proposal["proposal_digest"]
+        if chronology_poison:
+            policy["decision"] = "require_approval"
+            policy["decided_at"] = "2026-01-02T00:00:00.000Z"
         apply_object_digest(policy)
         gate = command["gate_decision"]
         gate["proposal_refs"] = [
@@ -368,6 +414,26 @@ def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
             }
         )
         apply_object_digest(delivery)
+        if chronology_poison:
+            approval = copy.deepcopy(build_positive_records()["approval_record"])
+            approval.update(
+                {
+                    "tenant_id": actor["tenant_id"],
+                    "request_id": proposal["proposal_id"],
+                    "request_digest": proposal["proposal_digest"],
+                    "policy_decision_id": policy["decision_id"],
+                    "policy_decision_digest": policy["decision_digest"],
+                    "constraints": copy.deepcopy(policy["constraints"]),
+                    "issued_at": "2025-01-01T00:00:00.000Z",
+                    "expires_at": "2030-01-01T00:00:00.000Z",
+                }
+            )
+            approval = policy_approval(approval)
+            command["approvals"] = [approval]
+            delivery["reviewer_refs"] = [
+                ref("approval_record", approval["approval_id"], approval["approval_digest"])
+            ]
+            apply_object_digest(delivery)
 
         authority = PostgresSkillLifecycleAuthority(
             privileged_connect=local_connections["skill_authority"],
@@ -376,6 +442,28 @@ def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
             ids=ids,
             receipt_verifier=AcceptingVerifier(),
             receipt_trust=receipt_trust,
+            approval_verifier=AcceptingVerifier() if chronology_poison else None,
+            approval_trust=(
+                lambda when: TrustContext(
+                    now=when,
+                    trusted_keys=(
+                        TrustedKey(
+                            "policy.authority",
+                            "policy.key.v1",
+                            frozenset({algorithm}),
+                            datetime(2020, 1, 1, tzinfo=timezone.utc),
+                            datetime(2030, 1, 1, tzinfo=timezone.utc),
+                        ),
+                    ),
+                    allowed_algorithms=frozenset({algorithm}),
+                    allowed_proof_domains=frozenset({"approval_record.v1"}),
+                    expected_issuers=frozenset({"policy.authority"}),
+                    allowed_domain_issuers=frozenset({("approval_record.v1", "policy.authority")}),
+                    trust_policy_version="upgrade-path.test.v1",
+                )
+            )
+            if chronology_poison
+            else None,
         )
         installed = authority.install_skill(actor_context=actor, **command)
         activate = copy.deepcopy(command)
@@ -397,9 +485,26 @@ def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
 
         with connect() as connection, connection.cursor() as cursor:
             cursor.execute("DROP FUNCTION gah_lock_skill_lifecycle_draft(jsonb,jsonb,text,jsonb)")
+        if chronology_poison:
+            phase15 = tuple(migration for migration in packaged if migration.version <= 15)
+            monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase15)
+            assert apply_migrations(admin_connect=connect)[-1].version == 15
+            monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
+            with pytest.raises(Exception, match="lifecycle approval authority binding"):
+                apply_migrations(admin_connect=connect)
+            with connect() as connection, connection.cursor() as cursor:
+                cursor.execute("SELECT max(version) FROM gah_schema_migrations")
+                assert cursor.fetchone() == (15,)
+                cursor.execute(
+                    "SELECT count(*), min(evidence_event_digest) FROM gah_skill_lifecycle_transitions"
+                )
+                assert cursor.fetchone() == transitions_before
+                cursor.execute("SELECT count(*), min(event_digest) FROM gah_evidence_events")
+                assert cursor.fetchone() == evidence_before
+            return
         monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
         applied = apply_migrations(admin_connect=connect)
-        assert applied[-1].version == 15
+        assert applied[-1].version == 16
         with connect() as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT count(*), min(evidence_event_digest) FROM gah_skill_lifecycle_transitions"
@@ -607,6 +712,7 @@ def test_advisory_lock_serializes_concurrent_fresh_installers(
         (13, 1),
         (14, 1),
         (15, 1),
+        (16, 1),
     ]
 
 
@@ -803,10 +909,10 @@ def test_checksum_drift_and_unknown_version_are_rejected(
             (discover_migrations()[0].checksum,),
         )
         cursor.execute(
-            "INSERT INTO gah_schema_migrations (version, checksum) VALUES (16, %s)",
+            "INSERT INTO gah_schema_migrations (version, checksum) VALUES (17, %s)",
             ("sha256:" + "1" * 64,),
         )
-    with pytest.raises(MigrationError, match="unknown migration version 0016"):
+    with pytest.raises(MigrationError, match="unknown migration version 0017"):
         apply_migrations(admin_connect=connect)
 
 
@@ -1129,6 +1235,326 @@ def test_phase15_upgrade_rejects_persisted_revoked_execution_replay_atomically(
         assert cursor.fetchone() == (14, None)
 
 
+def test_phase16_upgrade_rejects_ambiguous_actor_execution_state_atomically(
+    migration_database: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """0016 must not relabel a populated v15 row whose actor binding is false."""
+
+    import governed_agent_harness.persistence.migration as migration_module
+
+    packaged = discover_migrations()
+    phase15 = tuple(item for item in packaged if item.version <= 15)
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase15)
+    connect = migration_database["connect"]
+    apply_migrations(admin_connect=connect)
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO gah_builtin_execution_state ("
+            "tenant_id,actor_id,run_id,operation_id,operation_digest,request_id,"
+            "request_digest,grant_id,grant_digest,skill_id,revision,artifact_digest,"
+            "command_json,grant_json,state,issuance_evidence_json,issued_at) VALUES "
+            "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,1,%s,'{}'::jsonb,'{}'::jsonb,"
+            "'authorized','{}'::jsonb,%s::timestamptz)",
+            (
+                "018f0000-0000-7000-8000-000000000001",
+                "018f0000-0000-7000-8000-000000000002",
+                "018f0000-0000-7000-8000-000000000003",
+                "phase16-ambiguous-actor-row",
+                "sha256:" + "1" * 64,
+                "018f0000-0000-7000-8000-000000000004",
+                "sha256:" + "2" * 64,
+                "018f0000-0000-7000-8000-000000000005",
+                "sha256:" + "3" * 64,
+                "018f0000-0000-7000-8000-000000000006",
+                "sha256:" + "4" * 64,
+                "2026-01-01T00:00:00.000Z",
+            ),
+        )
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
+    with pytest.raises(Exception, match="cannot migrate ambiguous execution actor bindings"):
+        apply_migrations(admin_connect=connect)
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT (SELECT max(version) FROM gah_schema_migrations), "
+            "count(*) FROM gah_builtin_execution_state"
+        )
+        assert cursor.fetchone() == (15, 1)
+
+
+def test_phase16_upgrade_preserves_populated_internally_bound_actor_state(
+    migration_database: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A populated v15 row that satisfies 0016's exact binding survives unchanged."""
+
+    import governed_agent_harness.persistence.migration as migration_module
+
+    packaged = discover_migrations()
+    phase15 = tuple(item for item in packaged if item.version <= 15)
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase15)
+    connect = migration_database["connect"]
+    apply_migrations(admin_connect=connect)
+    tenant = "018f0000-0000-7000-8000-000000000001"
+    actor = "018f0000-0000-7000-8000-000000000002"
+    run = "018f0000-0000-7000-8000-000000000003"
+    operation = "phase16-bound-populated-row"
+    operation_digest = "sha256:" + "1" * 64
+    request = "018f0000-0000-7000-8000-000000000004"
+    request_digest = "sha256:" + "2" * 64
+    grant_id = "018f0000-0000-7000-8000-000000000005"
+    skill = "018f0000-0000-7000-8000-000000000006"
+    artifact_digest = "sha256:" + "3" * 64
+    grant = {
+        "tenant_id": tenant,
+        "actor_id": actor,
+        "run_id": run,
+        "request_id": request,
+        "request_digest": request_digest,
+        "grant_id": grant_id,
+    }
+    command = {
+        "operation_id": operation,
+        "operation_digest": operation_digest,
+        "skill_id": skill,
+        "revision": 1,
+        "artifact_digest": artifact_digest,
+        "tool_request": {
+            "tenant_id": tenant,
+            "actor_id": actor,
+            "run_id": run,
+            "request_id": request,
+            "request_digest": request_digest,
+        },
+    }
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT gah_canonical_sha256(%s::jsonb)", (json.dumps(grant),))
+        grant_digest = cursor.fetchone()[0]
+        issuance = {
+            "tenant_id": tenant,
+            "draft": {
+                "tenant_id": tenant,
+                "run_id": run,
+                "inline_payload": {
+                    "actor_id": actor,
+                    "operation_id": operation,
+                    "operation_digest": operation_digest,
+                    "command": command,
+                    "authorization_grant": grant,
+                    "authorization_grant_digest": grant_digest,
+                },
+            },
+        }
+        cursor.execute(
+            "INSERT INTO gah_builtin_execution_state ("
+            "tenant_id,actor_id,run_id,operation_id,operation_digest,request_id,"
+            "request_digest,grant_id,grant_digest,skill_id,revision,artifact_digest,"
+            "command_json,grant_json,state,issuance_evidence_json,issued_at) VALUES "
+            "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s::jsonb,%s::jsonb,"
+            "'authorized',%s::jsonb,%s::timestamptz)",
+            (
+                tenant,
+                actor,
+                run,
+                operation,
+                operation_digest,
+                request,
+                request_digest,
+                grant_id,
+                grant_digest,
+                skill,
+                artifact_digest,
+                json.dumps(command),
+                json.dumps(grant),
+                json.dumps(issuance),
+                "2026-01-01T00:00:00.000Z",
+            ),
+        )
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
+    assert apply_migrations(admin_connect=connect)[-1].version == 16
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT tenant_id,actor_id,operation_id,grant_digest,command_json,grant_json "
+            "FROM gah_builtin_execution_state"
+        )
+        assert cursor.fetchone() == (
+            tenant,
+            actor,
+            operation,
+            grant_digest,
+            command,
+            grant,
+        )
+
+
+def test_phase16_principal_entry_lock_waits_before_actor_binding_preflight(
+    migration_database: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """0016 cannot inspect actor bindings while a legacy principal reader is live."""
+
+    import governed_agent_harness.persistence.migration as migration_module
+
+    packaged = discover_migrations()
+    phase15 = tuple(item for item in packaged if item.version <= 15)
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase15)
+    connect = migration_database["connect"]
+    apply_migrations(admin_connect=connect)
+    reader = connect()
+    reader_cursor = reader.cursor()
+    reader_cursor.execute("SELECT 1 FROM gah_runtime_principals LIMIT 1")
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            upgrade = pool.submit(apply_migrations, admin_connect=connect)
+            deadline = time.monotonic() + 5
+            waiting = False
+            while time.monotonic() < deadline:
+                with connect() as observer, observer.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT EXISTS (SELECT 1 FROM pg_locks AS locks "
+                        "WHERE locks.relation='gah_runtime_principals'::regclass "
+                        "AND locks.mode='AccessExclusiveLock' AND NOT locks.granted)"
+                    )
+                    waiting = cursor.fetchone()[0]
+                if waiting:
+                    break
+                time.sleep(0.01)
+            assert waiting and not upgrade.done(), "0016 did not wait on principal entry"
+            reader.commit()
+            assert upgrade.result(timeout=8)[-1].version == 16
+    finally:
+        reader.rollback()
+        reader_cursor.close()
+        reader.close()
+
+
+def test_phase16_tenant_global_grant_rejects_second_actor_bound_state(
+    migration_database: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Actor-scoped caller IDs do not make an authority-issued grant reusable."""
+
+    import governed_agent_harness.persistence.migration as migration_module
+
+    packaged = discover_migrations()
+    phase15 = tuple(item for item in packaged if item.version <= 15)
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase15)
+    connect = migration_database["connect"]
+    apply_migrations(admin_connect=connect)
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
+    apply_migrations(admin_connect=connect)
+    tenant = "018f0000-0000-7000-8000-000000000001"
+    grant_id = "018f0000-0000-7000-8000-0000000000f0"
+
+    def row(actor_suffix: str):
+        actor = f"018f0000-0000-7000-8000-000000000{actor_suffix}"
+        run = f"018f0000-0000-7000-8000-000000000{actor_suffix}1"
+        request = f"018f0000-0000-7000-8000-000000000{actor_suffix}2"
+        skill = f"018f0000-0000-7000-8000-000000000{actor_suffix}3"
+        operation = f"phase16-grant-{actor_suffix}"
+        operation_digest = "sha256:" + actor_suffix[0] * 64
+        request_digest = "sha256:" + actor_suffix[1] * 64
+        artifact_digest = "sha256:" + ("c" if actor_suffix == "a1" else "d") * 64
+        grant = {
+            "tenant_id": tenant,
+            "actor_id": actor,
+            "run_id": run,
+            "request_id": request,
+            "request_digest": request_digest,
+            "grant_id": grant_id,
+        }
+        command = {
+            "operation_id": operation,
+            "operation_digest": operation_digest,
+            "skill_id": skill,
+            "revision": 1,
+            "artifact_digest": artifact_digest,
+            "tool_request": {
+                "tenant_id": tenant,
+                "actor_id": actor,
+                "run_id": run,
+                "request_id": request,
+                "request_digest": request_digest,
+            },
+        }
+        return (
+            actor,
+            run,
+            request,
+            skill,
+            operation,
+            operation_digest,
+            request_digest,
+            artifact_digest,
+            grant,
+            command,
+        )
+
+    def insert(cursor, values):
+        (
+            actor,
+            run,
+            request,
+            skill,
+            operation,
+            operation_digest,
+            request_digest,
+            artifact_digest,
+            grant,
+            command,
+        ) = values
+        cursor.execute("SELECT gah_canonical_sha256(%s::jsonb)", (json.dumps(grant),))
+        grant_digest = cursor.fetchone()[0]
+        issuance = {
+            "tenant_id": tenant,
+            "draft": {
+                "tenant_id": tenant,
+                "run_id": run,
+                "inline_payload": {
+                    "actor_id": actor,
+                    "operation_id": operation,
+                    "operation_digest": operation_digest,
+                    "command": command,
+                    "authorization_grant": grant,
+                    "authorization_grant_digest": grant_digest,
+                },
+            },
+        }
+        cursor.execute(
+            "INSERT INTO gah_builtin_execution_state ("
+            "tenant_id,actor_id,run_id,operation_id,operation_digest,request_id,"
+            "request_digest,grant_id,grant_digest,skill_id,revision,artifact_digest,"
+            "command_json,grant_json,state,issuance_evidence_json,issued_at) VALUES "
+            "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s::jsonb,%s::jsonb,"
+            "'authorized',%s::jsonb,%s::timestamptz)",
+            (
+                tenant,
+                actor,
+                run,
+                operation,
+                operation_digest,
+                request,
+                request_digest,
+                grant_id,
+                grant_digest,
+                skill,
+                artifact_digest,
+                json.dumps(command),
+                json.dumps(grant),
+                json.dumps(issuance),
+                "2026-01-01T00:00:00.000Z",
+            ),
+        )
+
+    first, second = row("a1"), row("b1")
+    with connect() as connection, connection.cursor() as cursor:
+        insert(cursor, first)
+    with connect() as connection, connection.cursor() as cursor:
+        with pytest.raises(Exception, match="grant_id"):
+            insert(cursor, second)
+        connection.rollback()
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT count(*) FROM gah_builtin_execution_state")
+        assert cursor.fetchone() == (1,)
+
+
 def test_phase15_upgrade_serializes_preflight_after_concurrent_legacy_writer(
     migration_database: dict[str, object], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1324,8 +1750,8 @@ def test_failed_migration_rolls_back_registry_and_schema(
 
     packaged = discover_migrations()
     broken = Migration(
-        version=16,
-        name="0016_broken.sql",
+        version=17,
+        name="0017_broken.sql",
         checksum="sha256:" + "2" * 64,
         sql="CREATE TABLE gah_partial (id integer); SELECT definitely_not_a_function()",
     )
