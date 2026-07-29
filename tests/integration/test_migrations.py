@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import sys
+import time
 import venv
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -11,6 +13,8 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+
+from governed_agent_harness.contracts import canonical_bytes, sha256_digest
 
 from governed_agent_harness.persistence.migration import (
     Migration,
@@ -54,6 +58,16 @@ def test_packaged_migrations_are_contiguous_and_checksum_exact() -> None:
         (3, "0003_runtime_api.sql"),
         (4, "0004_read_only_memory_retrieval.sql"),
         (5, "0005_governed_memory_promotion.sql"),
+        (6, "0006_governed_skill_lifecycle.sql"),
+        (7, "0007_skill_lifecycle_authority_role.sql"),
+        (8, "0008_fix_skill_replay_lock_key.sql"),
+        (9, "0009_fix_skill_lifecycle_predicates.sql"),
+        (10, "0010_skill_lifecycle_authority_split.sql"),
+        (11, "0011_builtin_execution_admission.sql"),
+        (12, "0012_harden_lifecycle_and_execution_authority.sql"),
+        (13, "0013_actor_scoped_skill_keys_and_evidence_reservation.sql"),
+        (14, "0014_serialize_lifecycle_evidence_drafts.sql"),
+        (15, "0015_verify_lifecycle_receipts_and_harden_execution.sql"),
     ]
     assert migrations[0].checksum.startswith("sha256:")
     assert len(migrations[0].checksum) == 71
@@ -111,6 +125,456 @@ def test_fresh_install_registers_migration_and_is_idempotent(
     assert all(table is not None for table in tables)
 
 
+def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
+    migration_database: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Apply 13 over a real 1--12 lifecycle row, not only an empty schema."""
+
+    import copy
+    import base64
+    from datetime import datetime, timezone
+    from hashlib import sha256
+
+    import psycopg
+    from nacl.signing import SigningKey
+
+    import governed_agent_harness.persistence.migration as migration_module
+    from governed_agent_harness.contracts import TrustContext, TrustedKey, apply_object_digest
+    from governed_agent_harness.contracts.positive_fixtures import build_positive_records
+    from governed_agent_harness.persistence import (
+        PostgresActiveSkillResolver,
+        PostgresDurableEffectStore,
+        PostgresSkillLifecycleAuthority,
+    )
+    from skill_lifecycle_support import command as build_skill_command, ref
+
+    signing_key = SigningKey(
+        bytes.fromhex("2f4b0b6f0906b7c5e3f0a25e7c5c9ddbcf8d175b75a5a09b2a1dc38841f47c72")
+    )
+    algorithm = "ed25519-rfc8032-gah-cjson-v1"
+
+    class AcceptingVerifier:
+        def verify(self, **_values: object) -> bool:
+            return True
+
+    def receipt_trust(now: datetime) -> TrustContext:
+        return TrustContext(
+            now=now,
+            trusted_keys=(
+                TrustedKey(
+                    issuer="runtime.authority",
+                    key_id="runtime.key.v1",
+                    algorithms=frozenset({algorithm}),
+                    valid_from=datetime(2020, 1, 1, tzinfo=timezone.utc),
+                    valid_until=datetime(2030, 1, 1, tzinfo=timezone.utc),
+                ),
+            ),
+            allowed_algorithms=frozenset({algorithm}),
+            allowed_proof_domains=frozenset({"activation_receipt.v1"}),
+            expected_issuers=frozenset({"runtime.authority"}),
+            allowed_domain_issuers=frozenset({("activation_receipt.v1", "runtime.authority")}),
+            trust_policy_version="upgrade-path.test.v1",
+        )
+
+    def activation_receipt(command):
+        receipt = copy.deepcopy(build_positive_records()["activation_receipt"])
+        delivery = command["delivery_envelope"]
+        proposal = command["skill_proposal"]
+        receipt.update(
+            {
+                "expires_at": "2030-01-01T00:00:00.000Z",
+                "target_scope": copy.deepcopy(delivery["target_scope"]),
+                "delivery_id": delivery["delivery_id"],
+                "delivery_digest": delivery["envelope_digest"],
+                "artifact_type": delivery["artifact_type"],
+                "artifact_id": delivery["artifact_id"],
+                "artifact_revision": delivery["artifact_revision"],
+                "artifact_digest": delivery["artifact_digest"],
+                "activated_revision": ref(
+                    "skill_proposal", proposal["artifact_id"], delivery["artifact_digest"]
+                ),
+                "evidence_refs": copy.deepcopy(delivery["evidence_refs"]),
+                "policy_refs": copy.deepcopy(delivery["policy_refs"]),
+                "reviewer_refs": copy.deepcopy(delivery["reviewer_refs"]),
+            }
+        )
+        apply_object_digest(receipt)
+        unsigned = copy.deepcopy(receipt)
+        unsigned.pop("proof", None)
+        unsigned.pop("receipt_digest", None)
+        object_digest = sha256_digest(unsigned)
+        proof = {
+            "issuer": "runtime.authority",
+            "key_id": "runtime.key.v1",
+            "algorithm": algorithm,
+            "proof_domain": "activation_receipt.v1",
+            "object_digest": object_digest,
+            "nonce": "U" * 22,
+        }
+        frame = canonical_bytes(
+            {
+                "protocol": "gah.detached-proof.v1",
+                **proof,
+                "unsigned_record": unsigned,
+            }
+        )
+        proof["detached_proof"] = (
+            base64.urlsafe_b64encode(signing_key.sign(frame).signature).rstrip(b"=").decode("ascii")
+        )
+        receipt["receipt_digest"] = object_digest
+        receipt["proof"] = proof
+        return receipt
+
+    connect = migration_database["connect"]
+    packaged = discover_migrations()
+    phase12 = tuple(migration for migration in packaged if migration.version <= 12)
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase12)
+
+    with connect() as connection:
+        parameters = connection.info.get_parameters()
+    role_suffix = uuid4().hex[:12]
+    app_role = f"gah_upgrade_app_{role_suffix}"
+    writer_role = f"gah_upgrade_writer_{role_suffix}"
+    skill_role = f"gah_upgrade_skill_{role_suffix}"
+    execution_role = f"gah_upgrade_execution_{role_suffix}"
+    service_roles = (app_role, writer_role, skill_role, execution_role)
+    try:
+        with connect() as connection, connection.cursor() as cursor:
+            for role in service_roles:
+                cursor.execute(f"CREATE ROLE {role} LOGIN NOSUPERUSER NOBYPASSRLS INHERIT")
+        PostgresDurableEffectStore.install_schema(
+            admin_connect=connect,
+            application_role=app_role,
+            authority_role=writer_role,
+            skill_lifecycle_authority_role=skill_role,
+            execution_admission_authority_role=execution_role,
+        )
+        public_key = signing_key.verify_key.encode()
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO gah_execution_proof_keys ("
+                "issuer,key_id,algorithm,proof_domain,public_key,"
+                "public_key_fingerprint,trust_policy_version,trust_policy_digest,"
+                "valid_from,valid_until) VALUES "
+                "(%s,%s,%s,%s,%s,%s,%s,%s,%s::timestamptz,%s::timestamptz)",
+                (
+                    "runtime.authority",
+                    "runtime.key.v1",
+                    algorithm,
+                    "activation_receipt.v1",
+                    public_key,
+                    "sha256:" + sha256(public_key).hexdigest(),
+                    "upgrade-path.test.v1",
+                    "sha256:" + "1" * 64,
+                    "2020-01-01T00:00:00.000Z",
+                    "2030-01-01T00:00:00.000Z",
+                ),
+            )
+        # Seed real Phase 12 state through the then-current lifecycle path.
+        # The current Python port calls the Phase 14 draft-lock helper, which
+        # did not exist in that historical schema.  This test-only no-op is
+        # removed before the genuine 13/14 upgrade; it cannot mask either
+        # migration's DDL or data-upgrade behavior.
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "CREATE FUNCTION gah_lock_skill_lifecycle_draft(jsonb,jsonb,text,jsonb) "
+                "RETURNS jsonb LANGUAGE sql AS 'SELECT NULL::jsonb'"
+            )
+            cursor.execute(
+                "REVOKE ALL ON FUNCTION gah_lock_skill_lifecycle_draft(jsonb,jsonb,text,jsonb) "
+                "FROM PUBLIC"
+            )
+            cursor.execute(
+                f"GRANT EXECUTE ON FUNCTION gah_lock_skill_lifecycle_draft(jsonb,jsonb,text,jsonb) TO {skill_role}"
+            )
+
+        actor, command = build_skill_command()
+        actor.update(
+            {
+                "actor_id": "018f0000-0000-7000-8000-0000000000c1",
+                "session_id": "018f0000-0000-7000-8000-0000000000d1",
+                "correlation_id": "018f0000-0000-7000-8000-0000000000d1",
+                "issued_at": "2026-01-01T00:00:01.000Z",
+                "expires_at": "2030-01-01T00:00:00.000Z",
+            }
+        )
+        apply_object_digest(actor)
+        PostgresDurableEffectStore.provision_principal(
+            admin_connect=connect, database_roles=service_roles, actor_context=actor
+        )
+
+        def role_connect(role: str):
+            return psycopg.connect(**{**parameters, "user": role})
+
+        sequence = 0xE000
+
+        def ids() -> str:
+            nonlocal sequence
+            sequence += 1
+            return f"018f0000-0000-7000-8000-{sequence:012x}"
+
+        local_connections = {
+            "admin": connect,
+            "app": lambda: role_connect(app_role),
+            "writer": lambda: role_connect(writer_role),
+            "skill_authority": lambda: role_connect(skill_role),
+            "store_at": lambda now: PostgresDurableEffectStore(
+                connect=lambda: role_connect(app_role),
+                privileged_connect=lambda: role_connect(writer_role),
+                clock=lambda: now,
+                ids=ids,
+            ),
+        }
+        now = datetime(2026, 1, 1, 0, 12, tzinfo=timezone.utc)
+        scope = command["skill_proposal"]["target_scope"]
+        scope.update({"actor_id": actor["actor_id"], "parent_digest": sha256_digest(actor)})
+        command["gate_decision"]["target_scope"] = copy.deepcopy(scope)
+        command["delivery_envelope"]["target_scope"] = copy.deepcopy(scope)
+        source = local_connections["store_at"](now).append(
+            tenant_id=actor["tenant_id"],
+            run_id="018f0000-0000-7000-8000-0000000000df",
+            event_kind="kernel.policy_decided",
+            policy_ref={
+                "record_type": "policy_decision",
+                "record_id": command["policy_decision"]["decision_id"],
+                "record_digest": command["policy_decision"]["decision_digest"],
+            },
+            payload={
+                "actor_id": actor["actor_id"],
+                "policy_decision_digest": command["policy_decision"]["decision_digest"],
+            },
+        )
+        source_ref = ref("evidence_envelope", source["envelope_id"], source["event_digest"])
+        command["source_evidence"] = [source]
+        proposal = command["skill_proposal"]
+        proposal["evidence_refs"] = [source_ref]
+        apply_object_digest(proposal)
+        policy = command["policy_decision"]
+        policy["request_digest"] = proposal["proposal_digest"]
+        apply_object_digest(policy)
+        gate = command["gate_decision"]
+        gate["proposal_refs"] = [
+            ref("skill_proposal", proposal["proposal_id"], proposal["proposal_digest"])
+        ]
+        apply_object_digest(gate)
+        delivery = command["delivery_envelope"]
+        delivery.update(
+            {
+                "evidence_refs": [source_ref],
+                "policy_refs": [
+                    ref("policy_decision", policy["decision_id"], policy["decision_digest"])
+                ],
+                "gate_decision_ref": ref("gate_decision", gate["gate_id"], gate["decision_digest"]),
+            }
+        )
+        apply_object_digest(delivery)
+
+        authority = PostgresSkillLifecycleAuthority(
+            privileged_connect=local_connections["skill_authority"],
+            evidence_writer_connect=local_connections["writer"],
+            clock=lambda: datetime(2026, 1, 1, 0, 30, tzinfo=timezone.utc),
+            ids=ids,
+            receipt_verifier=AcceptingVerifier(),
+            receipt_trust=receipt_trust,
+        )
+        installed = authority.install_skill(actor_context=actor, **command)
+        activate = copy.deepcopy(command)
+        activate.update(
+            {
+                "operation_id": "upgrade-existing-activation",
+                "expected_revision": 1,
+                "activation_receipt": activation_receipt(command),
+            }
+        )
+        active = authority.activate_skill(actor_context=actor, **activate)
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*), min(evidence_event_digest) FROM gah_skill_lifecycle_transitions"
+            )
+            transitions_before = cursor.fetchone()
+            cursor.execute("SELECT count(*), min(event_digest) FROM gah_evidence_events")
+            evidence_before = cursor.fetchone()
+
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("DROP FUNCTION gah_lock_skill_lifecycle_draft(jsonb,jsonb,text,jsonb)")
+        monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
+        applied = apply_migrations(admin_connect=connect)
+        assert applied[-1].version == 15
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*), min(evidence_event_digest) FROM gah_skill_lifecycle_transitions"
+            )
+            assert cursor.fetchone() == transitions_before
+            cursor.execute("SELECT count(*), min(event_digest) FROM gah_evidence_events")
+            assert cursor.fetchone() == evidence_before
+            cursor.execute(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname='gah_active_skill_projection_actor_pkey'"
+            )
+            assert cursor.fetchone()[0] == "PRIMARY KEY (tenant_id, actor_id, skill_id)"
+
+        replay = authority.activate_skill(actor_context=actor, **activate)
+        assert replay.replayed is True
+        assert replay.transition_digest == active.transition_digest
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*), min(evidence_event_digest) FROM gah_skill_lifecycle_transitions"
+            )
+            assert cursor.fetchone() == transitions_before
+            cursor.execute("SELECT count(*), min(event_digest) FROM gah_evidence_events")
+            assert cursor.fetchone() == evidence_before
+        resolved = PostgresActiveSkillResolver(
+            runtime_connect=lambda: role_connect(app_role)
+        ).resolve_active_skill(actor_context=actor, skill_id=installed.skill_id)
+        assert resolved is not None
+        assert resolved.artifact_digest == active.artifact_digest
+    finally:
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "REVOKE ALL ON FUNCTION "
+                "gah_lock_skill_lifecycle_draft(jsonb,jsonb,text,jsonb) "
+                f"FROM {skill_role}"
+            )
+            for role in service_roles:
+                cursor.execute(f"DROP ROLE IF EXISTS {role}")
+
+
+def test_phase44_registered_schema_upgrades_once_to_execution_admission(
+    migration_database: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import governed_agent_harness.persistence.migration as migration_module
+
+    connect = migration_database["connect"]
+    assert callable(connect)
+    packaged = discover_migrations()
+    phase44 = packaged[:10]
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase44)
+    assert apply_migrations(admin_connect=connect) == phase44
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
+
+    first_upgrade = apply_migrations(admin_connect=connect)
+    second_upgrade = apply_migrations(admin_connect=connect)
+
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT version, checksum FROM gah_schema_migrations ORDER BY version")
+        migrations = cursor.fetchall()
+        cursor.execute(
+            "SELECT to_regclass('gah_builtin_execution_state'), "
+            "to_regprocedure("
+            "'gah_issue_builtin_execution_authorization(jsonb,jsonb,jsonb,jsonb,jsonb)'"
+            ") IS NOT NULL"
+        )
+        installed = cursor.fetchone()
+    assert first_upgrade == second_upgrade == packaged
+    assert migrations == [(item.version, item.checksum) for item in packaged]
+    assert installed == ("gah_builtin_execution_state", True)
+
+
+@pytest.mark.parametrize(
+    ("replacement", "match"),
+    (
+        (
+            ("gah_ed25519", "gah_ed25519_missing_test_artifact"),
+            "gah_ed25519_missing_test_artifact",
+        ),
+        (
+            ("extension_row.extversion <> '1.0'", "extension_row.extversion <> '9.9'"),
+            "gah_ed25519 extension identity is unavailable or unsafe",
+        ),
+    ),
+)
+def test_execution_native_extension_identity_gate_rolls_back_on_missing_or_wrong_artifact(
+    migration_database: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: tuple[str, str],
+    match: str,
+) -> None:
+    """Harness-only SQL variants prove the native identity gate is transactional.
+
+    No installed extension files or PostgreSQL catalogs are changed: this test
+    substitutes only the in-memory migration payload before `apply_migrations`.
+    """
+
+    import governed_agent_harness.persistence.migration as migration_module
+
+    connect = migration_database["connect"]
+    assert callable(connect)
+    packaged = discover_migrations()
+    phase44 = packaged[:10]
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase44)
+    assert apply_migrations(admin_connect=connect) == phase44
+
+    candidate = packaged[10]
+    original, changed = replacement
+    modified_sql = candidate.sql.replace(original, changed)
+    assert modified_sql != candidate.sql
+    modified = Migration(
+        version=candidate.version,
+        name=candidate.name,
+        checksum=candidate.checksum,
+        sql=modified_sql,
+    )
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: (*phase44, modified))
+
+    with pytest.raises(Exception, match=match):
+        apply_migrations(admin_connect=connect)
+
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT version FROM gah_schema_migrations ORDER BY version")
+        applied_versions = cursor.fetchall()
+        cursor.execute(
+            "SELECT to_regclass('gah_builtin_execution_state'), "
+            "to_regprocedure('gah_rebuild_builtin_execution(jsonb,jsonb)'), "
+            "to_regnamespace('gah_crypto')"
+        )
+        leftovers = cursor.fetchone()
+    assert applied_versions == [(item.version,) for item in phase44]
+    assert leftovers == (None, None, None)
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        None,
+        True,
+        False,
+        [None, True, False, -9007199254740991, 9007199254740991],
+        {"text": 'quote=" slash=\\ control=\b\t\n'},
+        {"\U0001f600": "astral-first-in-utf16", "\ue000": "bmp-second-in-utf16"},
+    ),
+)
+def test_sql_canonical_digest_matches_python_contract(
+    migration_database: dict[str, object], value: object
+) -> None:
+    connect = migration_database["connect"]
+    assert callable(connect)
+    apply_migrations(admin_connect=connect)
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT gah_canonical_json(%s::jsonb), gah_canonical_sha256(%s::jsonb)",
+            (json.dumps(value, ensure_ascii=False), json.dumps(value, ensure_ascii=False)),
+        )
+        canonical, digest = cursor.fetchone()
+    assert canonical == canonical_bytes(value).decode("utf-8")
+    assert digest == sha256_digest(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    (1.5, 9007199254740992, -9007199254740992, "\ufffd", {"\ufffd": "forbidden"}),
+)
+def test_sql_canonical_digest_rejects_values_outside_contract_domain(
+    migration_database: dict[str, object], value: object
+) -> None:
+    connect = migration_database["connect"]
+    assert callable(connect)
+    apply_migrations(admin_connect=connect)
+    with connect() as connection, connection.cursor() as cursor:
+        with pytest.raises(Exception):
+            cursor.execute("SELECT gah_canonical_sha256(%s::jsonb)", (json.dumps(value),))
+
+
 def test_advisory_lock_serializes_concurrent_fresh_installers(
     migration_database: dict[str, object],
 ) -> None:
@@ -127,7 +591,23 @@ def test_advisory_lock_serializes_concurrent_fresh_installers(
         )
         rows = cursor.fetchall()
     assert results[0] == results[1]
-    assert rows == [(1, 1), (2, 1), (3, 1), (4, 1), (5, 1)]
+    assert rows == [
+        (1, 1),
+        (2, 1),
+        (3, 1),
+        (4, 1),
+        (5, 1),
+        (6, 1),
+        (7, 1),
+        (8, 1),
+        (9, 1),
+        (10, 1),
+        (11, 1),
+        (12, 1),
+        (13, 1),
+        (14, 1),
+        (15, 1),
+    ]
 
 
 def test_exact_phase4_schema_is_registered_without_reexecution(
@@ -323,11 +803,501 @@ def test_checksum_drift_and_unknown_version_are_rejected(
             (discover_migrations()[0].checksum,),
         )
         cursor.execute(
-            "INSERT INTO gah_schema_migrations (version, checksum) VALUES (6, %s)",
+            "INSERT INTO gah_schema_migrations (version, checksum) VALUES (16, %s)",
             ("sha256:" + "1" * 64,),
         )
-    with pytest.raises(MigrationError, match="unknown migration version 0006"):
+    with pytest.raises(MigrationError, match="unknown migration version 0016"):
         apply_migrations(admin_connect=connect)
+
+
+@pytest.mark.parametrize(
+    "poison",
+    (
+        "unknown_key",
+        "issued_after_recorded_at",
+        "cross_bound",
+        "proposal_delivery_cross_bound",
+        "row_command_cross_bound",
+    ),
+)
+def test_phase15_upgrade_rejects_untrusted_persisted_lifecycle_receipt_atomically(
+    migration_database: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    poison: str,
+) -> None:
+    import base64
+    from hashlib import sha256
+
+    from nacl.signing import SigningKey
+
+    import governed_agent_harness.persistence.migration as migration_module
+
+    signing_key = SigningKey(
+        bytes.fromhex("2f4b0b6f0906b7c5e3f0a25e7c5c9ddbcf8d175b75a5a09b2a1dc38841f47c72")
+    )
+    packaged = discover_migrations()
+    phase14 = tuple(item for item in packaged if item.version <= 14)
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase14)
+    connect = migration_database["connect"]
+    apply_migrations(admin_connect=connect)
+    tenant = "018f0000-0000-7000-8000-000000000001"
+    actor = "018f0000-0000-7000-8000-000000000002"
+    skill = "018f0000-0000-7000-8000-000000000023"
+    artifact = {"kind": "synthetic", "version": 1}
+    artifact_digest = sha256_digest(artifact)
+    proposal_digest = "sha256:" + "b" * 64
+    scope = {"tenant_id": tenant, "actor_id": actor}
+    policy_ref = {
+        "record_type": "policy_decision",
+        "record_id": "018f0000-0000-7000-8000-000000000028",
+        "record_digest": "sha256:" + "8" * 64,
+    }
+    install_command = {
+        "operation": "install",
+        "operation_digest": "sha256:" + "c" * 64,
+        "skill_proposal": {
+            "proposal_id": "018f0000-0000-7000-8000-000000000024",
+            "artifact_id": skill,
+            "artifact_revision": 1,
+            "artifact": artifact,
+            "tenant_id": tenant,
+            "proposal_digest": proposal_digest,
+            "target_scope": scope,
+        },
+        "delivery_envelope": {
+            "tenant_id": tenant,
+            "delivery_id": "018f0000-0000-7000-8000-000000000027",
+            "envelope_digest": "sha256:" + "7" * 64,
+            "artifact_type": "skill",
+            "artifact_id": skill,
+            "artifact_revision": 1,
+            "artifact_digest": artifact_digest,
+            "target_scope": scope,
+            "lifecycle_state": "delivered",
+            "issued_at": "2025-01-01T00:00:00.000Z",
+            "expires_at": "2030-01-01T00:00:00.000Z",
+            "evidence_refs": [],
+            "policy_refs": [policy_ref],
+            "reviewer_refs": [],
+        },
+        "policy_decision": {
+            "decision_id": policy_ref["record_id"],
+            "decision_digest": policy_ref["record_digest"],
+        },
+        "artifact": artifact,
+    }
+    key_id = "runtime.missing.v1" if poison == "unknown_key" else "runtime.after-recorded.v1"
+    issued_at = (
+        "2026-02-01T00:00:00.000Z"
+        if poison == "issued_after_recorded_at"
+        else "2026-01-01T00:00:00.000Z"
+    )
+    receipt = {
+        "record_type": "activation_receipt",
+        "tenant_id": tenant,
+        "receipt_id": "018f0000-0000-7000-8000-000000000029",
+        "issuer_role": "runtime_authority",
+        "target_scope": scope,
+        "delivery_id": install_command["delivery_envelope"]["delivery_id"],
+        "delivery_digest": install_command["delivery_envelope"]["envelope_digest"],
+        "artifact_type": "skill",
+        "artifact_id": skill,
+        "artifact_revision": 1,
+        "artifact_digest": artifact_digest,
+        "activated_revision": {
+            "record_type": "skill_proposal",
+            "record_id": skill,
+            "record_digest": artifact_digest,
+        },
+        "evidence_refs": [],
+        "policy_refs": [policy_ref],
+        "reviewer_refs": [],
+        "issued_at": issued_at,
+        "expires_at": "2030-01-01T00:00:00.000Z",
+    }
+    if poison == "cross_bound":
+        receipt["artifact_id"] = "018f0000-0000-7000-8000-0000000000ff"
+    elif poison == "proposal_delivery_cross_bound":
+        foreign_artifact_id = "018f0000-0000-7000-8000-0000000000fe"
+        receipt["artifact_id"] = foreign_artifact_id
+        install_command["delivery_envelope"]["artifact_id"] = foreign_artifact_id
+    receipt["receipt_digest"] = sha256_digest(receipt)
+    proof = {
+        "issuer": "runtime.authority",
+        "key_id": key_id,
+        "algorithm": "ed25519-rfc8032-gah-cjson-v1",
+        "proof_domain": "activation_receipt.v1",
+        "object_digest": receipt["receipt_digest"],
+        "nonce": "P" * 22,
+    }
+    proof_frame = canonical_bytes(
+        {
+            "protocol": "gah.detached-proof.v1",
+            **proof,
+            "unsigned_record": {
+                key: value for key, value in receipt.items() if key != "receipt_digest"
+            },
+        }
+    )
+    proof["detached_proof"] = (
+        base64.urlsafe_b64encode(signing_key.sign(proof_frame).signature)
+        .rstrip(b"=")
+        .decode("ascii")
+    )
+    receipt["proof"] = proof
+    activation_command = {
+        **install_command,
+        "operation": "activate",
+        "operation_id": "poisoned-pre15-activation",
+        "operation_digest": "sha256:" + "d" * 64,
+        "activation_receipt": receipt,
+        "rollback_receipt": None,
+    }
+    evidence = {
+        "record_type": "evidence_envelope",
+        "recorded_at": "2026-01-01T00:30:00.000Z",
+        "event_digest": "sha256:" + "e" * 64,
+    }
+    with connect() as connection, connection.cursor() as cursor:
+        if poison != "unknown_key":
+            public_key = signing_key.verify_key.encode()
+            cursor.execute(
+                "INSERT INTO gah_execution_proof_keys ("
+                "issuer,key_id,algorithm,proof_domain,public_key,"
+                "public_key_fingerprint,trust_policy_version,trust_policy_digest,"
+                "valid_from,valid_until) VALUES "
+                "(%s,%s,%s,%s,%s,%s,%s,%s,%s::timestamptz,%s::timestamptz)",
+                (
+                    "runtime.authority",
+                    key_id,
+                    "ed25519-rfc8032-gah-cjson-v1",
+                    "activation_receipt.v1",
+                    public_key,
+                    "sha256:" + sha256(public_key).hexdigest(),
+                    "phase5.1.upgrade-poison.test.v1",
+                    "sha256:" + "f" * 64,
+                    issued_at,
+                    "2030-01-01T00:00:00.000Z",
+                ),
+            )
+        persisted_skill = (
+            "018f0000-0000-7000-8000-0000000000fd" if poison == "row_command_cross_bound" else skill
+        )
+        cursor.execute(
+            "ALTER TABLE gah_skill_artifact_revisions "
+            "DROP CONSTRAINT gah_skill_artifact_command_sink_guard"
+        )
+        cursor.execute(
+            "ALTER TABLE gah_skill_lifecycle_transitions "
+            "DROP CONSTRAINT gah_skill_transition_command_sink_guard"
+        )
+        cursor.execute(
+            "INSERT INTO gah_skill_artifact_revisions ("
+            "tenant_id,actor_id,skill_id,revision,proposal_id,proposal_digest,"
+            "artifact_digest,artifact_json,command_json) VALUES "
+            "(%s,%s,%s,1,%s,%s,%s,'{}'::jsonb,%s::jsonb)",
+            (
+                tenant,
+                actor,
+                persisted_skill,
+                install_command["skill_proposal"]["proposal_id"],
+                proposal_digest,
+                artifact_digest,
+                json.dumps(install_command),
+            ),
+        )
+        cursor.execute(
+            "INSERT INTO gah_skill_lifecycle_transitions ("
+            "tenant_id,actor_id,skill_id,transition_sequence,operation_id,operation,"
+            "operation_digest,expected_revision,target_revision,from_state,to_state,"
+            "command_json,evidence_json,evidence_event_digest) VALUES "
+            "(%s,%s,%s,1,%s,'activate',%s,1,1,'installed','active',"
+            "%s::jsonb,%s::jsonb,%s)",
+            (
+                tenant,
+                actor,
+                persisted_skill,
+                activation_command["operation_id"],
+                activation_command["operation_digest"],
+                json.dumps(activation_command),
+                json.dumps(evidence),
+                evidence["event_digest"],
+            ),
+        )
+        cursor.execute(
+            "ALTER TABLE gah_skill_artifact_revisions "
+            "ADD CONSTRAINT gah_skill_artifact_command_sink_guard "
+            "CHECK (gah_skill_lifecycle_sink_command_valid("
+            "tenant_id,actor_id,skill_id,revision,artifact_digest,command_json) IS TRUE) "
+            "NOT VALID"
+        )
+        cursor.execute(
+            "ALTER TABLE gah_skill_lifecycle_transitions "
+            "ADD CONSTRAINT gah_skill_transition_command_sink_guard "
+            "CHECK (gah_skill_lifecycle_sink_command_valid("
+            "tenant_id,actor_id,skill_id,target_revision,"
+            "command_json #>> '{delivery_envelope,artifact_digest}',command_json) IS TRUE) "
+            "NOT VALID"
+        )
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
+    expected = (
+        "activation receipt is not bound"
+        if poison == "cross_bound"
+        else (
+            "lifecycle proposal and delivery composition is invalid"
+            if poison == "proposal_delivery_cross_bound"
+            else (
+                "persisted lifecycle row and command binding is invalid"
+                if poison == "row_command_cross_bound"
+                else "detached proof verification failed"
+            )
+        )
+    )
+    with pytest.raises(Exception, match=expected):
+        apply_migrations(admin_connect=connect)
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT max(version), "
+            "to_regprocedure('gah_verify_persisted_lifecycle_receipts"
+            "(jsonb,text,timestamptz,boolean,text,text,text,integer)') "
+            "FROM gah_schema_migrations"
+        )
+        assert cursor.fetchone() == (14, None)
+
+
+def test_phase15_upgrade_rejects_persisted_revoked_execution_replay_atomically(
+    migration_database: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import governed_agent_harness.persistence.migration as migration_module
+
+    packaged = discover_migrations()
+    phase14 = tuple(item for item in packaged if item.version <= 14)
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase14)
+    connect = migration_database["connect"]
+    apply_migrations(admin_connect=connect)
+    tenant = "018f0000-0000-7000-8000-000000000001"
+    command = {
+        "operation_id": "poisoned-execution-replay",
+        "operation_digest": "sha256:" + "1" * 64,
+        "skill_id": "018f0000-0000-7000-8000-000000000023",
+        "revision": 1,
+        "artifact_digest": "sha256:" + "2" * 64,
+        "tool_request": {
+            "request_id": "018f0000-0000-7000-8000-000000000025",
+            "request_digest": "sha256:" + "3" * 64,
+        },
+        "approvals": [{"revoked_at": "2026-01-01T00:00:00.000Z"}],
+    }
+    grant = {
+        "grant_id": "018f0000-0000-7000-8000-000000000026",
+        "request_id": command["tool_request"]["request_id"],
+    }
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO gah_builtin_execution_state ("
+            "tenant_id,actor_id,run_id,operation_id,operation_digest,request_id,"
+            "request_digest,grant_id,grant_digest,skill_id,revision,artifact_digest,"
+            "command_json,grant_json,state,issuance_evidence_json,issued_at) VALUES "
+            "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s::jsonb,%s::jsonb,"
+            "'authorized','{}'::jsonb,%s::timestamptz)",
+            (
+                tenant,
+                "018f0000-0000-7000-8000-000000000002",
+                "018f0000-0000-7000-8000-000000000003",
+                command["operation_id"],
+                command["operation_digest"],
+                command["tool_request"]["request_id"],
+                command["tool_request"]["request_digest"],
+                grant["grant_id"],
+                "sha256:" + "4" * 64,
+                command["skill_id"],
+                command["artifact_digest"],
+                json.dumps(command),
+                json.dumps(grant),
+                "2026-01-01T00:00:00.000Z",
+            ),
+        )
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
+    with pytest.raises(Exception, match="persisted execution approval is revoked"):
+        apply_migrations(admin_connect=connect)
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT max(version), "
+            "to_regprocedure('gah_lookup_builtin_execution_authorization_approval_validated"
+            "(jsonb,jsonb)') FROM gah_schema_migrations"
+        )
+        assert cursor.fetchone() == (14, None)
+
+
+def test_phase15_upgrade_serializes_preflight_after_concurrent_legacy_writer(
+    migration_database: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import governed_agent_harness.persistence.migration as migration_module
+
+    packaged = discover_migrations()
+    phase14 = tuple(item for item in packaged if item.version <= 14)
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase14)
+    connect = migration_database["connect"]
+    apply_migrations(admin_connect=connect)
+    command = {
+        "operation_id": "concurrent-poisoned-replay",
+        "operation_digest": "sha256:" + "1" * 64,
+        "skill_id": "018f0000-0000-7000-8000-000000000023",
+        "revision": 1,
+        "artifact_digest": "sha256:" + "2" * 64,
+        "tool_request": {
+            "request_id": "018f0000-0000-7000-8000-000000000025",
+            "request_digest": "sha256:" + "3" * 64,
+        },
+        "approvals": [{"revoked_at": "2026-01-01T00:00:00.000Z"}],
+    }
+    grant = {
+        "grant_id": "018f0000-0000-7000-8000-000000000026",
+        "request_id": command["tool_request"]["request_id"],
+    }
+    writer = connect()
+    writer_cursor = writer.cursor()
+    writer_cursor.execute("SELECT pg_backend_pid()")
+    writer_pid = writer_cursor.fetchone()[0]
+    writer_cursor.execute(
+        "INSERT INTO gah_builtin_execution_state ("
+        "tenant_id,actor_id,run_id,operation_id,operation_digest,request_id,"
+        "request_digest,grant_id,grant_digest,skill_id,revision,artifact_digest,"
+        "command_json,grant_json,state,issuance_evidence_json,issued_at) VALUES "
+        "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s::jsonb,%s::jsonb,"
+        "'authorized','{}'::jsonb,%s::timestamptz)",
+        (
+            "018f0000-0000-7000-8000-000000000001",
+            "018f0000-0000-7000-8000-000000000002",
+            "018f0000-0000-7000-8000-000000000003",
+            command["operation_id"],
+            command["operation_digest"],
+            command["tool_request"]["request_id"],
+            command["tool_request"]["request_digest"],
+            grant["grant_id"],
+            "sha256:" + "4" * 64,
+            command["skill_id"],
+            command["artifact_digest"],
+            json.dumps(command),
+            json.dumps(grant),
+            "2026-01-01T00:00:00.000Z",
+        ),
+    )
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            upgrade = pool.submit(apply_migrations, admin_connect=connect)
+            deadline = time.monotonic() + 5
+            waiting = False
+            while time.monotonic() < deadline:
+                with connect() as observer, observer.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT EXISTS ("
+                        "SELECT 1 FROM pg_locks AS held "
+                        "JOIN pg_stat_activity AS activity ON activity.pid=held.pid "
+                        "WHERE held.pid<>%s AND held.pid<>pg_backend_pid() "
+                        "AND activity.datname=current_database() "
+                        "AND held.relation='gah_builtin_execution_state'::regclass "
+                        "AND held.mode='ShareRowExclusiveLock' "
+                        "AND held.granted IS FALSE)",
+                        (writer_pid,),
+                    )
+                    waiting = cursor.fetchone()[0]
+                if waiting:
+                    break
+                time.sleep(0.01)
+            proved_wait = waiting and not upgrade.done()
+            writer.commit()
+            assert proved_wait, "migration did not wait behind the legacy execution writer"
+            with pytest.raises(Exception, match="persisted execution approval is revoked"):
+                upgrade.result(timeout=8)
+    finally:
+        writer.rollback()
+        writer_cursor.close()
+        writer.close()
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT max(version) FROM gah_schema_migrations")
+        assert cursor.fetchone()[0] == 14
+
+
+def test_phase15_upgrade_rejects_backdated_terminal_execution_atomically(
+    migration_database: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import governed_agent_harness.persistence.migration as migration_module
+
+    packaged = discover_migrations()
+    phase14 = tuple(item for item in packaged if item.version <= 14)
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase14)
+    connect = migration_database["connect"]
+    apply_migrations(admin_connect=connect)
+    tenant = "018f0000-0000-7000-8000-000000000001"
+    actor = "018f0000-0000-7000-8000-000000000002"
+    command = {
+        "operation_id": "poisoned-terminal-chronology",
+        "operation_digest": "sha256:" + "1" * 64,
+        "skill_id": "018f0000-0000-7000-8000-000000000023",
+        "revision": 1,
+        "artifact_digest": "sha256:" + "2" * 64,
+        "tool_request": {
+            "request_id": "018f0000-0000-7000-8000-000000000025",
+            "request_digest": "sha256:" + "3" * 64,
+        },
+        "approvals": [{}],
+    }
+    grant = {
+        "grant_id": "018f0000-0000-7000-8000-000000000026",
+        "request_id": command["tool_request"]["request_id"],
+    }
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO gah_builtin_execution_state ("
+            "tenant_id,actor_id,run_id,operation_id,operation_digest,request_id,"
+            "request_digest,grant_id,grant_digest,skill_id,revision,artifact_digest,"
+            "command_json,grant_json,state,issuance_evidence_json,intent_evidence_json,"
+            "outcome_json,outcome_evidence_json,execution_attempt_id,owner_generation,"
+            "lease_expires_at,issued_at,completed_at) VALUES "
+            "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s::jsonb,%s::jsonb,"
+            "'completed','{}'::jsonb,%s::jsonb,%s::jsonb,'{}'::jsonb,%s,1,"
+            "%s::timestamptz,%s::timestamptz,%s::timestamptz)",
+            (
+                tenant,
+                actor,
+                "018f0000-0000-7000-8000-000000000003",
+                command["operation_id"],
+                command["operation_digest"],
+                command["tool_request"]["request_id"],
+                command["tool_request"]["request_digest"],
+                grant["grant_id"],
+                "sha256:" + "4" * 64,
+                command["skill_id"],
+                command["artifact_digest"],
+                json.dumps(command),
+                json.dumps(grant),
+                json.dumps({"recorded_at": "2026-01-02T00:00:00.000Z"}),
+                json.dumps({"occurred_at": "2026-01-01T00:00:00.000Z"}),
+                "018f0000-0000-7000-8000-000000000027",
+                "2026-01-03T00:00:00.000Z",
+                "2026-01-01T00:00:00.000Z",
+                "2026-01-03T00:00:00.000Z",
+            ),
+        )
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
+    with pytest.raises(Exception, match="terminal execution predates its intent"):
+        apply_migrations(admin_connect=connect)
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT max(version), "
+            "to_regprocedure('gah_builtin_execution_validate_outcome"
+            "(jsonb,jsonb,jsonb,jsonb,jsonb,text)') FROM gah_schema_migrations"
+        )
+        version, public_validator = cursor.fetchone()
+        assert version == 14
+        assert public_validator is not None
+        cursor.execute(
+            "SELECT to_regprocedure('gah_builtin_execution_validate_outcome_validated"
+            "(jsonb,jsonb,jsonb,jsonb,jsonb,text)')"
+        )
+        assert cursor.fetchone()[0] is None
 
 
 def test_registry_tampering_and_empty_registry_with_legacy_tables_fail_closed(
@@ -354,8 +1324,8 @@ def test_failed_migration_rolls_back_registry_and_schema(
 
     packaged = discover_migrations()
     broken = Migration(
-        version=6,
-        name="0006_broken.sql",
+        version=16,
+        name="0016_broken.sql",
         checksum="sha256:" + "2" * 64,
         sql="CREATE TABLE gah_partial (id integer); SELECT definitely_not_a_function()",
     )
