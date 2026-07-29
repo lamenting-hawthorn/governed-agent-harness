@@ -177,7 +177,7 @@ points. Replays do not invoke the handler, changed bindings conflict, concurrent
 consume has one winner, poisoned canonical evidence cannot rebuild authority,
 and an expired execution lease recovers only to `indeterminate` without retry.
 Execution-state RLS binds the exact actor context and session, and the database
-rejects any initial or renewed lease that reaches or outlives grant expiry.
+rejects any lease that reaches or outlives grant expiry.
 
 This slice is not a package runner, general executor, transport, provider
 integration, or sandbox.

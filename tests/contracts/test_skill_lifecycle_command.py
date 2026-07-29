@@ -89,6 +89,25 @@ def test_canonical_wire_command_binds_every_mutable_lifecycle_input() -> None:
         validate_skill_lifecycle_command(actor_context=actor, command=changed)
 
 
+@pytest.mark.parametrize("invalid_operation", (["install"], {"operation": "install"}))
+def test_lifecycle_operation_shape_is_normalized_to_semantic_error(
+    invalid_operation: object,
+) -> None:
+    actor, command = _command()
+    wire = build_skill_lifecycle_wire_command("install", command)
+    wire["operation"] = invalid_operation
+    with pytest.raises(SemanticError, match="unknown skill lifecycle operation"):
+        validate_skill_lifecycle_command(actor_context=actor, command=wire)
+
+
+def test_missing_lifecycle_operation_is_normalized_to_semantic_error() -> None:
+    actor, command = _command()
+    wire = build_skill_lifecycle_wire_command("install", command)
+    del wire["operation"]
+    with pytest.raises(SemanticError, match="unknown skill lifecycle operation"):
+        validate_skill_lifecycle_command(actor_context=actor, command=wire)
+
+
 def test_rejects_noncanonical_source_evidence_and_invented_artifact_fields() -> None:
     actor, command = _command()
     wire = build_skill_lifecycle_wire_command("install", command)

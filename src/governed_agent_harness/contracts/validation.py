@@ -542,8 +542,8 @@ def validate_skill_lifecycle_command(
         "activation_receipt",
         "rollback_receipt",
     }
-    operation = wire["operation"]
-    if operation not in SKILL_LIFECYCLE_OPERATIONS:
+    operation = wire.get("operation")
+    if not isinstance(operation, str) or operation not in SKILL_LIFECYCLE_OPERATIONS:
         raise SemanticError("unknown skill lifecycle operation")
     required = common | {"skill_id"} if operation == "rebuild" else lifecycle_required
     if set(wire) != required:

@@ -1,6 +1,6 @@
--- Re-attest legacy lifecycle receipts against current database trust during
--- upgrade, then verify them historically during rebuild.  The migration does
--- not claim to recover a pre-0015 database acceptance timestamp.
+-- Verify legacy lifecycle receipts only at their immutable ledger timestamp
+-- during upgrade and rebuild.  Migration-time wall clock is not evidence of
+-- historical authority.
 
 CREATE FUNCTION gah_assert_lifecycle_receipt_binding(
     p_command jsonb, p_operation text
@@ -284,19 +284,9 @@ BEGIN
          WHERE operation IN ('activate','rollback')
          ORDER BY tenant_id, actor_id, skill_id, transition_sequence
     LOOP
-        PERFORM public.gah_verify_persisted_lifecycle_receipts(
-            transition_row.command_json,
-            transition_row.operation,
-            pg_catalog.transaction_timestamp(),
-            false,
-            transition_row.tenant_id,
-            transition_row.actor_id,
-            transition_row.skill_id,
-            transition_row.target_revision
-        );
-        -- Separately establish that the upgraded row is replayable under the
-        -- immutable ledger timestamp used by deterministic rebuild.  This is
-        -- compatibility proof, not proof of its original DB acceptance time.
+        -- A legacy row can prove only its recorded ledger time.  The verifier
+        -- still checks exact binding, signature, trusted key, and revocation
+        -- as of that immutable time.
         PERFORM public.gah_verify_persisted_lifecycle_receipts(
             transition_row.command_json,
             transition_row.operation,

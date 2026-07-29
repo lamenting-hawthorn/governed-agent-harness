@@ -126,13 +126,17 @@ def test_fresh_install_registers_migration_and_is_idempotent(
     assert all(table is not None for table in tables)
 
 
-@pytest.mark.parametrize("chronology_poison", (False, True), ids=("valid", "pre-policy"))
+@pytest.mark.parametrize(
+    "upgrade_case",
+    ("valid", "pre_policy", "expired_receipt", "expired_approval"),
+)
 def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
-    migration_database: dict[str, object], monkeypatch: pytest.MonkeyPatch, chronology_poison: bool
+    migration_database: dict[str, object], monkeypatch: pytest.MonkeyPatch, upgrade_case: str
 ) -> None:
     """Apply 13 over a real 1--12 lifecycle row, not only an empty schema."""
 
     import copy
+    import dataclasses
     import base64
     from datetime import datetime, timezone
     from hashlib import sha256
@@ -141,7 +145,12 @@ def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
     from nacl.signing import SigningKey
 
     import governed_agent_harness.persistence.migration as migration_module
-    from governed_agent_harness.contracts import TrustContext, TrustedKey, apply_object_digest
+    from governed_agent_harness.contracts import (
+        TrustContext,
+        TrustedKey,
+        apply_object_digest,
+        verify_runtime_receipt,
+    )
     from governed_agent_harness.contracts.positive_fixtures import build_positive_records
     from governed_agent_harness.persistence import (
         PostgresActiveSkillResolver,
@@ -168,13 +177,22 @@ def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
                     key_id="runtime.key.v1",
                     algorithms=frozenset({algorithm}),
                     valid_from=datetime(2020, 1, 1, tzinfo=timezone.utc),
-                    valid_until=datetime(2030, 1, 1, tzinfo=timezone.utc),
+                    valid_until=(
+                        datetime(2026, 1, 2, tzinfo=timezone.utc)
+                        if upgrade_case == "expired_receipt"
+                        else datetime(2030, 1, 1, tzinfo=timezone.utc)
+                    ),
                 ),
             ),
             allowed_algorithms=frozenset({algorithm}),
-            allowed_proof_domains=frozenset({"activation_receipt.v1"}),
+            allowed_proof_domains=frozenset({"activation_receipt.v1", "rollback_receipt.v1"}),
             expected_issuers=frozenset({"runtime.authority"}),
-            allowed_domain_issuers=frozenset({("activation_receipt.v1", "runtime.authority")}),
+            allowed_domain_issuers=frozenset(
+                {
+                    ("activation_receipt.v1", "runtime.authority"),
+                    ("rollback_receipt.v1", "runtime.authority"),
+                }
+            ),
             trust_policy_version="upgrade-path.test.v1",
         )
 
@@ -184,7 +202,11 @@ def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
         proposal = command["skill_proposal"]
         receipt.update(
             {
-                "expires_at": "2030-01-01T00:00:00.000Z",
+                "expires_at": (
+                    "2026-01-02T00:00:00.000Z"
+                    if upgrade_case == "expired_receipt"
+                    else "2030-01-01T00:00:00.000Z"
+                ),
                 "target_scope": copy.deepcopy(delivery["target_scope"]),
                 "delivery_id": delivery["delivery_id"],
                 "delivery_digest": delivery["envelope_digest"],
@@ -212,6 +234,63 @@ def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
             "proof_domain": "activation_receipt.v1",
             "object_digest": object_digest,
             "nonce": "U" * 22,
+        }
+        frame = canonical_bytes(
+            {
+                "protocol": "gah.detached-proof.v1",
+                **proof,
+                "unsigned_record": unsigned,
+            }
+        )
+        proof["detached_proof"] = (
+            base64.urlsafe_b64encode(signing_key.sign(frame).signature).rstrip(b"=").decode("ascii")
+        )
+        receipt["receipt_digest"] = object_digest
+        receipt["proof"] = proof
+        return receipt
+
+    def rollback_receipt(command, activation):
+        receipt = copy.deepcopy(build_positive_records()["rollback_receipt"])
+        delivery = command["delivery_envelope"]
+        proposal = command["skill_proposal"]
+        receipt.update(
+            {
+                "expires_at": (
+                    "2026-01-02T00:00:00.000Z"
+                    if upgrade_case == "expired_receipt"
+                    else "2030-01-01T00:00:00.000Z"
+                ),
+                "target_scope": copy.deepcopy(activation["target_scope"]),
+                "activation_receipt_ref": ref(
+                    "activation_receipt", activation["receipt_id"], activation["receipt_digest"]
+                ),
+                "artifact_type": delivery["artifact_type"],
+                "artifact_id": delivery["artifact_id"],
+                "artifact_revision": delivery["artifact_revision"],
+                "artifact_digest": delivery["artifact_digest"],
+                "rollback_revision": ref(
+                    "skill_proposal", proposal["artifact_id"], delivery["artifact_digest"]
+                ),
+                "restored_revision_ref": ref(
+                    "skill_proposal", proposal["artifact_id"], delivery["artifact_digest"]
+                ),
+                "evidence_refs": copy.deepcopy(delivery["evidence_refs"]),
+                "policy_refs": copy.deepcopy(delivery["policy_refs"]),
+                "reviewer_refs": copy.deepcopy(delivery["reviewer_refs"]),
+            }
+        )
+        apply_object_digest(receipt)
+        unsigned = copy.deepcopy(receipt)
+        unsigned.pop("proof", None)
+        unsigned.pop("receipt_digest", None)
+        object_digest = sha256_digest(unsigned)
+        proof = {
+            "issuer": "runtime.authority",
+            "key_id": "runtime.key.v1",
+            "algorithm": algorithm,
+            "proof_domain": "rollback_receipt.v1",
+            "object_digest": object_digest,
+            "nonce": "R" * 22,
         }
         frame = canonical_bytes(
             {
@@ -292,10 +371,37 @@ def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
                     "upgrade-path.test.v1",
                     "sha256:" + "1" * 64,
                     "2020-01-01T00:00:00.000Z",
-                    "2030-01-01T00:00:00.000Z",
+                    (
+                        "2026-01-02T00:00:00.000Z"
+                        if upgrade_case == "expired_receipt"
+                        else "2030-01-01T00:00:00.000Z"
+                    ),
                 ),
             )
-            if chronology_poison:
+            cursor.execute(
+                "INSERT INTO gah_execution_proof_keys ("
+                "issuer,key_id,algorithm,proof_domain,public_key,"
+                "public_key_fingerprint,trust_policy_version,trust_policy_digest,"
+                "valid_from,valid_until) VALUES "
+                "(%s,%s,%s,%s,%s,%s,%s,%s,%s::timestamptz,%s::timestamptz)",
+                (
+                    "runtime.authority",
+                    "runtime.key.v1",
+                    algorithm,
+                    "rollback_receipt.v1",
+                    public_key,
+                    "sha256:" + sha256(public_key).hexdigest(),
+                    "upgrade-path.test.v1",
+                    "sha256:" + "1" * 64,
+                    "2020-01-01T00:00:00.000Z",
+                    (
+                        "2026-01-02T00:00:00.000Z"
+                        if upgrade_case == "expired_receipt"
+                        else "2030-01-01T00:00:00.000Z"
+                    ),
+                ),
+            )
+            if upgrade_case in {"pre_policy", "expired_approval"}:
                 cursor.execute(
                     "INSERT INTO gah_execution_proof_keys (issuer,key_id,algorithm,proof_domain,"
                     "public_key,public_key_fingerprint,trust_policy_version,trust_policy_digest,"
@@ -310,7 +416,11 @@ def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
                         "upgrade-path.test.v1",
                         "sha256:" + "2" * 64,
                         "2020-01-01T00:00:00.000Z",
-                        "2030-01-01T00:00:00.000Z",
+                        (
+                            "2026-01-02T00:00:00.000Z"
+                            if upgrade_case == "expired_approval"
+                            else "2030-01-01T00:00:00.000Z"
+                        ),
                     ),
                 )
         # Seed real Phase 12 state through the then-current lifecycle path.
@@ -394,9 +504,13 @@ def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
         apply_object_digest(proposal)
         policy = command["policy_decision"]
         policy["request_digest"] = proposal["proposal_digest"]
-        if chronology_poison:
+        if upgrade_case in {"pre_policy", "expired_approval"}:
             policy["decision"] = "require_approval"
-            policy["decided_at"] = "2026-01-02T00:00:00.000Z"
+            policy["decided_at"] = (
+                "2026-01-02T00:00:00.000Z"
+                if upgrade_case == "pre_policy"
+                else "2026-01-01T00:00:00.000Z"
+            )
         apply_object_digest(policy)
         gate = command["gate_decision"]
         gate["proposal_refs"] = [
@@ -414,7 +528,7 @@ def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
             }
         )
         apply_object_digest(delivery)
-        if chronology_poison:
+        if upgrade_case in {"pre_policy", "expired_approval"}:
             approval = copy.deepcopy(build_positive_records()["approval_record"])
             approval.update(
                 {
@@ -424,8 +538,16 @@ def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
                     "policy_decision_id": policy["decision_id"],
                     "policy_decision_digest": policy["decision_digest"],
                     "constraints": copy.deepcopy(policy["constraints"]),
-                    "issued_at": "2025-01-01T00:00:00.000Z",
-                    "expires_at": "2030-01-01T00:00:00.000Z",
+                    "issued_at": (
+                        "2025-01-01T00:00:00.000Z"
+                        if upgrade_case == "pre_policy"
+                        else "2026-01-01T00:10:00.000Z"
+                    ),
+                    "expires_at": (
+                        "2026-01-02T00:00:00.000Z"
+                        if upgrade_case == "expired_approval"
+                        else "2030-01-01T00:00:00.000Z"
+                    ),
                 }
             )
             approval = policy_approval(approval)
@@ -442,7 +564,9 @@ def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
             ids=ids,
             receipt_verifier=AcceptingVerifier(),
             receipt_trust=receipt_trust,
-            approval_verifier=AcceptingVerifier() if chronology_poison else None,
+            approval_verifier=(
+                AcceptingVerifier() if upgrade_case in {"pre_policy", "expired_approval"} else None
+            ),
             approval_trust=(
                 lambda when: TrustContext(
                     now=when,
@@ -452,7 +576,11 @@ def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
                             "policy.key.v1",
                             frozenset({algorithm}),
                             datetime(2020, 1, 1, tzinfo=timezone.utc),
-                            datetime(2030, 1, 1, tzinfo=timezone.utc),
+                            (
+                                datetime(2026, 1, 2, tzinfo=timezone.utc)
+                                if upgrade_case == "expired_approval"
+                                else datetime(2030, 1, 1, tzinfo=timezone.utc)
+                            ),
                         ),
                     ),
                     allowed_algorithms=frozenset({algorithm}),
@@ -462,7 +590,7 @@ def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
                     trust_policy_version="upgrade-path.test.v1",
                 )
             )
-            if chronology_poison
+            if upgrade_case in {"pre_policy", "expired_approval"}
             else None,
         )
         installed = authority.install_skill(actor_context=actor, **command)
@@ -475,6 +603,48 @@ def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
             }
         )
         active = authority.activate_skill(actor_context=actor, **activate)
+        rollback = copy.deepcopy(command)
+        rollback.update(
+            {
+                "operation_id": "upgrade-existing-rollback",
+                "expected_revision": 1,
+                "activation_receipt": activate["activation_receipt"],
+                "rollback_receipt": rollback_receipt(command, activate["activation_receipt"]),
+            }
+        )
+
+        def rollback_receipt_trust(when: datetime) -> TrustContext:
+            trust = receipt_trust(when)
+            activation_history = verify_runtime_receipt(
+                rollback["activation_receipt"],
+                verifier=AcceptingVerifier(),
+                trust=trust,
+                expected_tenant=actor["tenant_id"],
+            )
+            rollback_history = verify_runtime_receipt(
+                rollback["rollback_receipt"],
+                verifier=AcceptingVerifier(),
+                trust=trust,
+                expected_tenant=actor["tenant_id"],
+            )
+            return dataclasses.replace(
+                trust,
+                historical_acceptances=(
+                    dataclasses.replace(activation_history, ledger_position=1),
+                    dataclasses.replace(rollback_history, ledger_position=2),
+                ),
+            )
+
+        PostgresSkillLifecycleAuthority(
+            privileged_connect=local_connections["skill_authority"],
+            evidence_writer_connect=local_connections["writer"],
+            clock=lambda: datetime(2026, 1, 1, 0, 30, tzinfo=timezone.utc),
+            ids=ids,
+            receipt_verifier=AcceptingVerifier(),
+            receipt_trust=rollback_receipt_trust,
+            approval_verifier=authority._approval_verifier,
+            approval_trust=authority._approval_trust,
+        ).rollback_skill(actor_context=actor, **rollback)
         with connect() as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT count(*), min(evidence_event_digest) FROM gah_skill_lifecycle_transitions"
@@ -485,10 +655,14 @@ def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
 
         with connect() as connection, connection.cursor() as cursor:
             cursor.execute("DROP FUNCTION gah_lock_skill_lifecycle_draft(jsonb,jsonb,text,jsonb)")
-        if chronology_poison:
+        phase14 = tuple(migration for migration in packaged if migration.version <= 14)
+        monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase14)
+        assert apply_migrations(admin_connect=connect)[-1].version == 14
+        if upgrade_case in {"pre_policy", "expired_approval"}:
             phase15 = tuple(migration for migration in packaged if migration.version <= 15)
             monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase15)
             assert apply_migrations(admin_connect=connect)[-1].version == 15
+        if upgrade_case == "pre_policy":
             monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
             with pytest.raises(Exception, match="lifecycle approval authority binding"):
                 apply_migrations(admin_connect=connect)
@@ -536,10 +710,14 @@ def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
     finally:
         with connect() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "REVOKE ALL ON FUNCTION "
-                "gah_lock_skill_lifecycle_draft(jsonb,jsonb,text,jsonb) "
-                f"FROM {skill_role}"
+                "SELECT to_regprocedure('gah_lock_skill_lifecycle_draft(jsonb,jsonb,text,jsonb)')"
             )
+            if cursor.fetchone()[0] is not None:
+                cursor.execute(
+                    "REVOKE ALL ON FUNCTION "
+                    "gah_lock_skill_lifecycle_draft(jsonb,jsonb,text,jsonb) "
+                    f"FROM {skill_role}"
+                )
             for role in service_roles:
                 cursor.execute(f"DROP ROLE IF EXISTS {role}")
 

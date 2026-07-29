@@ -730,11 +730,8 @@ BEGIN
         THEN
             RAISE EXCEPTION 'persisted lifecycle approval row binding is invalid';
         END IF;
-        PERFORM public.gah_verify_lifecycle_approvals(
-            transition_row.command_json,
-            pg_catalog.transaction_timestamp(),
-            false
-        );
+        -- Stored rows are admissible only under their immutable ledger time;
+        -- current wall-clock authority cannot retroactively invalidate them.
         PERFORM public.gah_verify_lifecycle_approvals(
             transition_row.command_json,
             transition_row.recorded_at,
