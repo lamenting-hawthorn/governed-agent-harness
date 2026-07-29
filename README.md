@@ -146,10 +146,7 @@ record = {
 wire_bytes = canonical_bytes(record)
 digest = sha256_digest(record)
 
-assert wire_bytes == (
-    b'{"record_type":"example_record","schema_version":"1.0",'
-    b'"tenant_id":"tenant.demo"}'
-)
+assert wire_bytes == b'{"record_type":"example_record","schema_version":"1.0","tenant_id":"tenant.demo"}'
 assert digest.startswith("sha256:")
 ```
 
