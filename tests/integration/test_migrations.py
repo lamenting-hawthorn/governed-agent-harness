@@ -790,6 +790,13 @@ def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
                 )
                 assert cursor.fetchone() == (None,)
                 cursor.execute(
+                    "SELECT "
+                    "to_regprocedure('gah_actor_extension_scalar_valid(jsonb)'), "
+                    "to_regprocedure('gah_actor_extension_value_valid(jsonb)'), "
+                    "to_regprocedure('gah_actor_extensions_valid(jsonb)')"
+                )
+                assert cursor.fetchone() == (None, None, None)
+                cursor.execute(
                     "SELECT count(*), min(evidence_event_digest) FROM gah_skill_lifecycle_transitions"
                 )
                 assert cursor.fetchone() == transitions_before

@@ -5,6 +5,94 @@
 LOCK TABLE public.gah_runtime_principals IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE public.gah_skill_lifecycle_transitions IN ACCESS EXCLUSIVE MODE;
 
+CREATE FUNCTION gah_actor_extension_scalar_valid(p_value jsonb) RETURNS boolean
+LANGUAGE plpgsql IMMUTABLE STRICT SET search_path = pg_catalog, public AS $function$
+DECLARE
+    value_type text := pg_catalog.jsonb_typeof(p_value);
+    value_text text;
+BEGIN
+    IF value_type IN ('null', 'boolean') THEN
+        RETURN true;
+    END IF;
+    IF value_type = 'string' THEN
+        value_text := p_value #>> '{}';
+        RETURN pg_catalog.char_length(value_text) <= 256
+           AND pg_catalog.strpos(value_text, pg_catalog.chr(65533)) = 0;
+    END IF;
+    IF value_type = 'number' THEN
+        value_text := p_value #>> '{}';
+        IF value_text !~ '^-?(0|[1-9][0-9]*)$' THEN
+            RETURN false;
+        END IF;
+        RETURN pg_catalog.abs(value_text::numeric) <= 9007199254740991;
+    END IF;
+    RETURN false;
+END
+$function$;
+ALTER FUNCTION gah_actor_extension_scalar_valid(jsonb) OWNER TO gah_schema_owner;
+REVOKE ALL ON FUNCTION gah_actor_extension_scalar_valid(jsonb)
+    FROM PUBLIC, gah_runtime, gah_authority_writer,
+         gah_skill_lifecycle_authority, gah_execution_admission_authority;
+
+CREATE FUNCTION gah_actor_extension_value_valid(p_value jsonb) RETURNS boolean
+LANGUAGE plpgsql IMMUTABLE STRICT SET search_path = pg_catalog, public AS $function$
+DECLARE
+    value_type text := pg_catalog.jsonb_typeof(p_value);
+BEGIN
+    IF value_type IN ('null', 'boolean', 'number', 'string') THEN
+        RETURN public.gah_actor_extension_scalar_valid(p_value);
+    END IF;
+    IF value_type = 'array' THEN
+        RETURN pg_catalog.jsonb_array_length(p_value) <= 4
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM pg_catalog.jsonb_array_elements(p_value) AS elements(value)
+                WHERE NOT public.gah_actor_extension_scalar_valid(value)
+           );
+    END IF;
+    IF value_type = 'object' THEN
+        RETURN (SELECT count(*) <= 4 FROM pg_catalog.jsonb_object_keys(p_value))
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM pg_catalog.jsonb_each(p_value) AS entries(key,value)
+                WHERE pg_catalog.char_length(key) > 32
+                   OR key !~ '^[a-z][a-z0-9_]*$'
+                   OR NOT public.gah_actor_extension_scalar_valid(value)
+           );
+    END IF;
+    RETURN false;
+END
+$function$;
+ALTER FUNCTION gah_actor_extension_value_valid(jsonb) OWNER TO gah_schema_owner;
+REVOKE ALL ON FUNCTION gah_actor_extension_value_valid(jsonb)
+    FROM PUBLIC, gah_runtime, gah_authority_writer,
+         gah_skill_lifecycle_authority, gah_execution_admission_authority;
+
+CREATE FUNCTION gah_actor_extensions_valid(p_extensions jsonb) RETURNS boolean
+LANGUAGE plpgsql IMMUTABLE STRICT SET search_path = pg_catalog, public AS $function$
+BEGIN
+    IF pg_catalog.jsonb_typeof(p_extensions) IS DISTINCT FROM 'object'
+       OR (SELECT count(*) > 16 FROM pg_catalog.jsonb_object_keys(p_extensions))
+       OR EXISTS (
+           SELECT 1
+             FROM pg_catalog.jsonb_each(p_extensions) AS entries(key,value)
+            WHERE pg_catalog.char_length(key) > 190
+               OR key !~ '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+/[a-z][a-z0-9_]{0,63}$'
+               OR NOT public.gah_actor_extension_value_valid(value)
+       )
+    THEN
+        RETURN false;
+    END IF;
+    RETURN pg_catalog.octet_length(pg_catalog.convert_to(
+        public.gah_canonical_json(p_extensions), 'UTF8'
+    )) <= 8192;
+END
+$function$;
+ALTER FUNCTION gah_actor_extensions_valid(jsonb) OWNER TO gah_schema_owner;
+REVOKE ALL ON FUNCTION gah_actor_extensions_valid(jsonb)
+    FROM PUBLIC, gah_runtime, gah_authority_writer,
+         gah_skill_lifecycle_authority, gah_execution_admission_authority;
+
 CREATE OR REPLACE FUNCTION gah_skill_assert_actor(p_actor jsonb) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $function$
 DECLARE
@@ -46,6 +134,8 @@ BEGIN
        OR pg_catalog.jsonb_typeof(p_actor->'auth') IS DISTINCT FROM 'object'
        OR pg_catalog.jsonb_typeof(p_actor->'scope_authority') IS DISTINCT FROM 'object'
        OR (p_actor ? 'extensions' AND pg_catalog.jsonb_typeof(p_actor->'extensions') IS DISTINCT FROM 'object')
+       OR (p_actor ? 'extensions'
+           AND NOT public.gah_actor_extensions_valid(p_actor->'extensions'))
     THEN
         RAISE EXCEPTION 'authority database principal is outside actor scope';
     END IF;
@@ -58,6 +148,19 @@ BEGIN
         WHERE pg_catalog.jsonb_typeof(value) IS DISTINCT FROM 'string'
            OR value #>> '{}' !~ '^[A-Za-z0-9](?:[A-Za-z0-9._:/-]{0,126}[A-Za-z0-9])?$'
     ) THEN
+        RAISE EXCEPTION 'authority database principal is outside actor scope';
+    END IF;
+    IF pg_catalog.jsonb_array_length(p_actor->'roles') > 64
+       OR (
+           SELECT count(*) <> count(DISTINCT value)
+             FROM pg_catalog.jsonb_array_elements(p_actor->'roles') AS elements(value)
+       )
+       OR pg_catalog.jsonb_array_length(p_actor->'capabilities') > 128
+       OR (
+           SELECT count(*) <> count(DISTINCT value)
+             FROM pg_catalog.jsonb_array_elements(p_actor->'capabilities') AS elements(value)
+       )
+    THEN
         RAISE EXCEPTION 'authority database principal is outside actor scope';
     END IF;
     auth := p_actor->'auth';
@@ -96,6 +199,14 @@ BEGIN
     THEN
         RAISE EXCEPTION 'authority database principal is outside actor scope';
     END IF;
+    IF pg_catalog.jsonb_array_length(scope->'allowed_levels') > 7
+       OR (
+           SELECT count(*) <> count(DISTINCT value)
+             FROM pg_catalog.jsonb_array_elements(scope->'allowed_levels') AS elements(value)
+       )
+    THEN
+        RAISE EXCEPTION 'authority database principal is outside actor scope';
+    END IF;
     IF EXISTS (
         SELECT 1 FROM pg_catalog.jsonb_array_elements(scope->'allowed_levels') AS value
         WHERE pg_catalog.jsonb_typeof(value) IS DISTINCT FROM 'string'
@@ -106,6 +217,11 @@ BEGIN
           AND (
               pg_catalog.jsonb_typeof(value) IS DISTINCT FROM 'array'
               OR pg_catalog.jsonb_array_length(value) = 0
+              OR pg_catalog.jsonb_array_length(value) > 64
+              OR (
+                  SELECT count(*) <> count(DISTINCT item)
+                    FROM pg_catalog.jsonb_array_elements(value) AS elements(item)
+              )
               OR EXISTS (
                   SELECT 1 FROM pg_catalog.jsonb_array_elements(value) AS item
                   WHERE pg_catalog.jsonb_typeof(item) IS DISTINCT FROM 'string'
@@ -119,6 +235,7 @@ BEGIN
        OR p_actor->>'expires_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$'
        OR NOT pg_catalog.pg_input_is_valid(p_actor->>'issued_at', 'timestamp with time zone')
        OR NOT pg_catalog.pg_input_is_valid(p_actor->>'expires_at', 'timestamp with time zone')
+       OR (auth->>'verified_at')::timestamptz > (p_actor->>'issued_at')::timestamptz
        OR (p_actor->>'issued_at')::timestamptz > (p_actor->>'expires_at')::timestamptz
        OR (p_actor->>'issued_at')::timestamptz > pg_catalog.clock_timestamp()
        OR (p_actor->>'expires_at')::timestamptz <= pg_catalog.clock_timestamp()

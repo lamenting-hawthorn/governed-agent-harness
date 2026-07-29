@@ -14,7 +14,11 @@ from hashlib import sha256
 import pytest
 from nacl.signing import SigningKey
 
-from governed_agent_harness.contracts import apply_object_digest, validate_skill_lifecycle_command
+from governed_agent_harness.contracts import (
+    ActorContext,
+    apply_object_digest,
+    validate_skill_lifecycle_command,
+)
 from governed_agent_harness.contracts.errors import SemanticError
 from governed_agent_harness.persistence.skills import (
     build_skill_lifecycle_wire_command,
@@ -22,6 +26,104 @@ from governed_agent_harness.persistence.skills import (
 )
 
 import test_governed_skill_lifecycle as lifecycle
+
+
+_ACTOR_BOUND_ATTACKS = (
+    "roles_limit",
+    "roles_unique",
+    "capabilities_limit",
+    "capabilities_unique",
+    "allowed_levels_limit",
+    "allowed_levels_unique",
+    "team_ids_limit",
+    "team_ids_unique",
+    "organization_ids_limit",
+    "organization_ids_unique",
+    "project_ids_limit",
+    "project_ids_unique",
+    "workspace_ids_limit",
+    "workspace_ids_unique",
+    "extensions_property_limit",
+    "extensions_property_name",
+    "extensions_property_name_length",
+    "extensions_string_length",
+    "extensions_integer_range",
+    "extensions_number_type",
+    "extensions_array_limit",
+    "extensions_array_item_shape",
+    "extensions_object_limit",
+    "extensions_object_key",
+    "extensions_object_key_length",
+    "extensions_object_value_shape",
+    "extensions_canonical_size",
+    "verified_after_issued",
+)
+
+
+def _actor_bound_poison(actor, attack):
+    poisoned = copy.deepcopy(actor)
+    memberships = {
+        "team_ids",
+        "organization_ids",
+        "project_ids",
+        "workspace_ids",
+    }
+    if attack == "roles_limit":
+        poisoned["roles"] = [f"role.{index}" for index in range(65)]
+    elif attack == "roles_unique":
+        poisoned["roles"] = ["operator", "operator"]
+    elif attack == "capabilities_limit":
+        poisoned["capabilities"] = [f"capability.{index}" for index in range(129)]
+    elif attack == "capabilities_unique":
+        poisoned["capabilities"] = ["memory.read", "memory.read"]
+    elif attack == "allowed_levels_limit":
+        poisoned["scope_authority"]["allowed_levels"].append("actor")
+    elif attack == "allowed_levels_unique":
+        poisoned["scope_authority"]["allowed_levels"] = ["actor", "actor"]
+    elif attack.removesuffix("_limit") in memberships:
+        field = attack.removesuffix("_limit")
+        poisoned["scope_authority"][field] = [
+            f"018f0000-0000-7000-8000-{index:012x}" for index in range(65)
+        ]
+    elif attack.removesuffix("_unique") in memberships:
+        field = attack.removesuffix("_unique")
+        value = poisoned["scope_authority"][field][0]
+        poisoned["scope_authority"][field] = [value, value]
+    elif attack == "extensions_property_limit":
+        poisoned["extensions"] = {f"example{index}.org/key": index for index in range(17)}
+    elif attack == "extensions_property_name":
+        poisoned["extensions"] = {"not_namespaced": True}
+    elif attack == "extensions_property_name_length":
+        poisoned["extensions"] = {f"{'a.' * 94}a/key": True}
+    elif attack == "extensions_string_length":
+        poisoned["extensions"] = {"example.org/key": "x" * 257}
+    elif attack == "extensions_integer_range":
+        poisoned["extensions"] = {"example.org/key": 9_007_199_254_740_992}
+    elif attack == "extensions_number_type":
+        poisoned["extensions"] = {"example.org/key": 1.5}
+    elif attack == "extensions_array_limit":
+        poisoned["extensions"] = {"example.org/key": [1, 2, 3, 4, 5]}
+    elif attack == "extensions_array_item_shape":
+        poisoned["extensions"] = {"example.org/key": [{"nested": True}]}
+    elif attack == "extensions_object_limit":
+        poisoned["extensions"] = {"example.org/key": {f"key_{index}": index for index in range(5)}}
+    elif attack == "extensions_object_key":
+        poisoned["extensions"] = {"example.org/key": {"Not_Snake": True}}
+    elif attack == "extensions_object_key_length":
+        poisoned["extensions"] = {"example.org/key": {"a" * 33: True}}
+    elif attack == "extensions_object_value_shape":
+        poisoned["extensions"] = {"example.org/key": {"nested": [True]}}
+    elif attack == "extensions_canonical_size":
+        poisoned["extensions"] = {
+            f"example{index}.org/key": {f"value_{child}": "x" * 256 for child in range(4)}
+            for index in range(16)
+        }
+    elif attack == "verified_after_issued":
+        poisoned["auth"]["verified_at"] = "2026-01-01T00:00:01.000Z"
+        poisoned["issued_at"] = "2026-01-01T00:00:00.000Z"
+    else:
+        raise AssertionError(f"unknown actor attack: {attack}")
+    return poisoned
 
 
 @pytest.mark.parametrize(
@@ -77,6 +179,88 @@ def test_phase51_partial_actor_cannot_replay_through_python_or_sql(postgres_conn
                 "SELECT gah_rebuild_skill_projection(%s::jsonb,%s::jsonb)",
                 (json.dumps(partial), json.dumps(rebuild_wire)),
             )
+    assert lifecycle._skill_authority_snapshot(postgres_connections) == before
+
+
+@pytest.mark.parametrize("attack", _ACTOR_BOUND_ATTACKS)
+def test_phase51_actor_contract_bounds_cannot_replay_or_rebuild_through_sql(
+    postgres_connections, attack
+):
+    """Every missing ActorContext invariant fails before durable SQL effects."""
+
+    actor, command = lifecycle._persisted_command(postgres_connections)
+    authority = lifecycle.PostgresSkillLifecycleAuthority(
+        privileged_connect=postgres_connections["skill_authority"],
+        evidence_writer_connect=postgres_connections["writer"],
+        clock=lambda: lifecycle.NOW,
+        ids=lifecycle._ids(),
+    )
+    authority.install_skill(actor_context=actor, **command)
+    poisoned = _actor_bound_poison(actor, attack)
+    with pytest.raises(Exception):
+        ActorContext(poisoned)
+
+    before = lifecycle._skill_authority_snapshot(postgres_connections)
+    wire = build_skill_lifecycle_wire_command("install", command)
+    with postgres_connections["skill_authority"]() as connection, connection.cursor() as cursor:
+        with pytest.raises(Exception, match="actor scope"):
+            cursor.execute(
+                "SELECT gah_lookup_skill_replay(%s::jsonb,%s::jsonb)",
+                (json.dumps(poisoned), json.dumps(wire)),
+            )
+        connection.rollback()
+        rebuild = build_skill_lifecycle_wire_command(
+            "rebuild",
+            {
+                "operation_id": f"phase51-actor-bound-{attack}-rebuild",
+                "expected_revision": 1,
+                "skill_id": command["skill_proposal"]["artifact_id"],
+            },
+        )
+        with pytest.raises(Exception, match="actor scope"):
+            cursor.execute(
+                "SELECT gah_rebuild_skill_projection(%s::jsonb,%s::jsonb)",
+                (json.dumps(poisoned), json.dumps(rebuild)),
+            )
+    assert lifecycle._skill_authority_snapshot(postgres_connections) == before
+
+
+def test_phase51_actor_contract_maxima_can_replay_through_sql(postgres_connections):
+    """Canonical upper bounds remain usable while the bypasses fail closed."""
+
+    actor, command = lifecycle._persisted_command(postgres_connections)
+    authority = lifecycle.PostgresSkillLifecycleAuthority(
+        privileged_connect=postgres_connections["skill_authority"],
+        evidence_writer_connect=postgres_connections["writer"],
+        clock=lambda: lifecycle.NOW,
+        ids=lifecycle._ids(),
+    )
+    authority.install_skill(actor_context=actor, **command)
+    bounded = copy.deepcopy(actor)
+    bounded["roles"] = [f"role.{index}" for index in range(64)]
+    bounded["capabilities"] = [f"capability.{index}" for index in range(128)]
+    for field in ("team_ids", "organization_ids", "project_ids", "workspace_ids"):
+        bounded["scope_authority"][field] = [
+            f"018f0000-0000-7000-8000-{index:012x}" for index in range(64)
+        ]
+    bounded["extensions"] = {
+        f"example{index}.org/key": (
+            [None, True, 9_007_199_254_740_991, "x" * 256]
+            if index % 2 == 0
+            else {"first": None, "second": False, "third": -9_007_199_254_740_991, "fourth": "x"}
+        )
+        for index in range(16)
+    }
+    ActorContext(bounded)
+
+    before = lifecycle._skill_authority_snapshot(postgres_connections)
+    wire = build_skill_lifecycle_wire_command("install", command)
+    with postgres_connections["skill_authority"]() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT gah_lookup_skill_replay(%s::jsonb,%s::jsonb)",
+            (json.dumps(bounded), json.dumps(wire)),
+        )
+        assert cursor.fetchone()[0]["replayed"] is True
     assert lifecycle._skill_authority_snapshot(postgres_connections) == before
 
 
@@ -323,8 +507,8 @@ def _function_acl(postgres_connections, signatures):
         return {row[0]: row[1:] for row in cursor.fetchall()}
 
 
-def test_phase51_0016_actor_scope_and_lifecycle_sink_catalog_contract(postgres_connections):
-    """0016 must leave actor scope and hardened functions observable in the DB."""
+def test_phase51_0017_actor_scope_and_lifecycle_sink_catalog_contract(postgres_connections):
+    """0017 must leave actor scope and hardened functions observable in the DB."""
 
     with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
         cursor.execute(
@@ -382,6 +566,47 @@ def test_phase51_0016_actor_scope_and_lifecycle_sink_catalog_contract(postgres_c
         "gah_rebuild_skill_projection(jsonb,jsonb)",
     ):
         assert "gah_verify_lifecycle_approvals" in functions[signature][3]
+
+    actor_helpers = (
+        "gah_skill_assert_actor(jsonb)",
+        "gah_actor_extension_scalar_valid(jsonb)",
+        "gah_actor_extension_value_valid(jsonb)",
+        "gah_actor_extensions_valid(jsonb)",
+    )
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT p.oid::regprocedure::text, r.rolname, p.proconfig, "
+            "p.prosecdef, p.provolatile, "
+            "has_function_privilege('public', p.oid, 'EXECUTE'), "
+            "has_function_privilege('gah_runtime', p.oid, 'EXECUTE'), "
+            "has_function_privilege('gah_authority_writer', p.oid, 'EXECUTE'), "
+            "has_function_privilege('gah_skill_lifecycle_authority', p.oid, 'EXECUTE'), "
+            "has_function_privilege('gah_execution_admission_authority', p.oid, 'EXECUTE') "
+            "FROM pg_proc AS p JOIN pg_roles AS r ON r.oid=p.proowner "
+            "WHERE p.oid = ANY(%s::regprocedure[]) ORDER BY p.oid::regprocedure::text",
+            (list(actor_helpers),),
+        )
+        actor_catalog = {row[0]: row[1:] for row in cursor.fetchall()}
+    assert set(actor_catalog) == set(actor_helpers)
+    actor_assert = actor_catalog["gah_skill_assert_actor(jsonb)"]
+    assert actor_assert[:5] == (
+        "gah_schema_owner",
+        ["search_path=pg_catalog, public"],
+        True,
+        "v",
+        False,
+    )
+    assert actor_assert[5:] == (False, False, False, False)
+    for signature in actor_helpers[1:]:
+        helper = actor_catalog[signature]
+        assert helper[:5] == (
+            "gah_schema_owner",
+            ["search_path=pg_catalog, public"],
+            False,
+            "i",
+            False,
+        )
+        assert helper[5:] == (False, False, False, False)
 
     lifecycle_acl = _function_acl(
         postgres_connections,
