@@ -3370,7 +3370,7 @@ def test_runtime_caps_lease_to_the_grant_fence(
         assert cursor.fetchone() == (True, True)
 
 
-def test_direct_begin_rejects_submicrosecond_and_oversized_lease_without_mutation(
+def test_direct_begin_rejects_null_submicrosecond_and_oversized_lease_without_mutation(
     postgres_connections,
 ):
     """A rounded-to-now lease must fail before it writes the intent or state."""
@@ -3393,7 +3393,7 @@ def test_direct_begin_rejects_submicrosecond_and_oversized_lease_without_mutatio
     }
     before = _snapshot(postgres_connections)
 
-    def begin(lease_seconds: float) -> None:
+    def begin(lease_seconds: float | None) -> None:
         with postgres_connections["app"]() as connection, connection.cursor() as cursor:
             intent = execution_module._build_evidence(
                 actor=actor,
@@ -3422,6 +3422,9 @@ def test_direct_begin_rejects_submicrosecond_and_oversized_lease_without_mutatio
                 ),
             )
 
+    with pytest.raises(Exception, match="bounded runtime path"):
+        begin(None)
+    assert _snapshot(postgres_connections) == before
     with pytest.raises(Exception, match="no positive fenced lease window"):
         begin(5e-324)
     assert _snapshot(postgres_connections) == before

@@ -1755,7 +1755,7 @@ BEGIN
        OR payload->>'revision' !~ '^[1-9][0-9]*$'
     THEN RAISE EXCEPTION 'execution intent revision is malformed'; END IF;
     IF NOT pg_has_role(session_user, 'gah_runtime', 'MEMBER')
-       OR p_lease_seconds <= 0 OR p_lease_seconds > 300
+       OR p_lease_seconds IS NULL OR p_lease_seconds <= 0 OR p_lease_seconds > 300
     THEN RAISE EXCEPTION 'execution consume requires the bounded runtime path'; END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended(
         'execution:operation:'||(p_actor->>'tenant_id')||':'||
