@@ -383,14 +383,14 @@ def _execution_command(actor, skill_command, *, operation_id="phase5-execution-1
                 "skill_id": skill_command["skill_proposal"]["artifact_id"],
                 "revision": 1,
                 "artifact_digest": BUILTIN_ECHO_ARTIFACT_DIGEST,
-                "input": {"message": "hello"},
+                "input": dict(execution_module.BUILTIN_ECHO_INPUT),
             },
             "effect_classes": ["execute_code"],
             "idempotency": {
                 "tenant_id": actor["tenant_id"],
                 "idempotency_key": f"phase5.{operation_id}",
                 "operation_digest": sha256_digest(
-                    {"operation_id": operation_id, "input": {"message": "hello"}}
+                    {"operation_id": operation_id, "input": execution_module.BUILTIN_ECHO_INPUT}
                 ),
             },
             "requested_at": _ts(NOW - timedelta(minutes=5)),
@@ -448,6 +448,34 @@ def _execution_command(actor, skill_command, *, operation_id="phase5-execution-1
         "validity": copy.deepcopy(skill_command["validity"]),
         "retention": copy.deepcopy(skill_command["retention"]),
     }
+
+
+def _execution_command_with_sentinel_input(actor, skill_command, *, operation_id: str):
+    """Build a fully bound command whose only semantic change is echo input."""
+
+    command = _execution_command(actor, skill_command, operation_id=operation_id)
+    request = command["tool_request"]
+    request["arguments"]["input"] = {"sentinel": "must-not-persist"}
+    apply_object_digest(request)
+    policy = command["policy_decision"]
+    policy["request_id"] = request["request_id"]
+    policy["request_digest"] = request["request_digest"]
+    apply_object_digest(policy)
+    approval = command["approvals"][0]
+    approval["request_id"] = request["request_id"]
+    approval["request_digest"] = request["request_digest"]
+    approval["policy_decision_id"] = policy["decision_id"]
+    approval["policy_decision_digest"] = policy["decision_digest"]
+    command["approvals"] = [
+        _sign_record(
+            approval,
+            issuer="policy.authority",
+            key_id="policy.key.v1",
+            proof_domain="approval_record.v1",
+            nonce="S" * 22,
+        )
+    ]
+    return command
 
 
 def _authority(postgres_connections, now=NOW):
@@ -928,7 +956,7 @@ def test_exact_active_digest_executes_once_and_replays_after_restart(postgres_co
             clock=lambda: NOW,
             ids=_ids(),
         ).invoke(actor_context=actor, authorization=authorization)
-    assert first.outcome["result_payload"] == {"echo": {"message": "hello"}}
+    assert first.outcome["result_payload"] == {"echo": dict(execution_module.BUILTIN_ECHO_INPUT)}
     assert replay.outcome == first.outcome
     assert replay.replayed is True
     assert len(calls) == 1
@@ -1220,7 +1248,7 @@ def test_direct_sql_rejects_outcome_backdated_before_persisted_intent(
         approvals=tuple(command["approvals"]),
         grant=authorization.grant,
         intent=intent,
-        result_payload={"echo": {"message": "hello"}},
+        result_payload={"echo": dict(execution_module.BUILTIN_ECHO_INPUT)},
         status="succeeded",
     )
     intent_at = datetime.fromisoformat(intent["recorded_at"].replace("Z", "+00:00"))
@@ -1300,9 +1328,7 @@ def test_runtime_rejects_mutated_caller_authorization_before_handler_or_mutation
         return original(registry, request=request)
 
     with patch.object(BuiltinHandlerRegistry, "invoke", new=counted):
-        with pytest.raises(
-            Exception, match="execution consume authorization is missing or changed"
-        ):
+        with pytest.raises(Exception, match="fixed synthetic value"):
             PostgresBuiltinExecutionRuntime(
                 runtime_connect=postgres_connections["app"],
                 clock=lambda: NOW,
@@ -1311,6 +1337,72 @@ def test_runtime_rejects_mutated_caller_authorization_before_handler_or_mutation
 
     assert calls == []
     assert _snapshot(postgres_connections) == before
+
+
+def test_fixed_echo_input_rejects_python_and_direct_sql_sentinels_without_mutation(
+    postgres_connections,
+):
+    actor, skill = _persisted_skill(postgres_connections)
+    authorization = _authority(postgres_connections).issue(
+        actor_context=actor,
+        command=_execution_command(actor, skill, operation_id="phase5-fixed-input-sentinel"),
+    )
+    request = copy.deepcopy(dict(authorization.command["tool_request"]))
+    request["arguments"]["input"] = {"sentinel": "must-not-persist"}
+    apply_object_digest(request)
+    active = execution_module.ActiveSkillDigest(
+        authorization.command["skill_id"],
+        authorization.command["revision"],
+        authorization.command["artifact_digest"],
+    )
+    registry = BuiltinHandlerRegistry()
+    with pytest.raises(TypeError):
+        execution_module.BUILTIN_ECHO_INPUT["sentinel"] = "must-not-persist"
+    with pytest.raises(Exception, match="fixed synthetic value"):
+        registry.validate(active=active, request=request)
+    with pytest.raises(Exception, match="fixed synthetic value"):
+        registry.invoke(request=request)
+
+    command = copy.deepcopy(dict(authorization.command))
+    command["tool_request"] = request
+    unsigned = copy.deepcopy(command)
+    unsigned.pop("operation_digest")
+    command["operation_digest"] = execution_operation_digest(unsigned)
+    evidence = copy.deepcopy(dict(authorization.issuance_evidence))
+    before = _snapshot(postgres_connections)
+    with pytest.raises(Exception):
+        _direct_issue(
+            postgres_connections,
+            actor=actor,
+            command=command,
+            grant=authorization.grant,
+            evidence=evidence,
+            writer_authorization=evidence["draft"]["inline_payload"]["writer_authorization"],
+        )
+    assert _snapshot(postgres_connections) == before
+    assert "must-not-persist" not in json.dumps(before, sort_keys=True)
+
+
+def test_sql_sink_rejects_fully_rebound_sentinel_when_python_validation_is_bypassed(
+    postgres_connections,
+):
+    """The SQL authority sink, not only the host registry, owns exact input."""
+
+    actor, skill = _persisted_skill(postgres_connections)
+    command = _execution_command_with_sentinel_input(
+        actor,
+        skill,
+        operation_id="phase5-sql-sink-sentinel",
+    )
+    before = _snapshot(postgres_connections)
+
+    with patch.object(BuiltinHandlerRegistry, "validate", new=lambda *args, **kwargs: None):
+        with pytest.raises(Exception, match="execution arguments are malformed or oversized"):
+            _authority(postgres_connections).issue(actor_context=actor, command=command)
+
+    after = _snapshot(postgres_connections)
+    assert after == before
+    assert "must-not-persist" not in json.dumps(after, sort_keys=True)
 
 
 @pytest.mark.parametrize(
@@ -3249,37 +3341,92 @@ def test_retention_expiry_is_rechecked_at_consume_without_mutation(
     assert _snapshot(postgres_connections) == before
 
 
-def test_runtime_rejects_lease_that_outlives_actor_and_grant_without_mutation(
+def test_runtime_caps_lease_to_the_grant_fence(
     postgres_connections,
 ):
+    issued_baseline = datetime.now(timezone.utc)
     actor, skill = _persisted_skill(
         postgres_connections,
-        actor_expires_at=_ts(NOW + timedelta(minutes=2)),
+        actor_expires_at=_ts(issued_baseline + timedelta(seconds=20)),
     )
-    authorization = _authority(postgres_connections).issue(
+    authorization = _authority(postgres_connections, now=issued_baseline).issue(
         actor_context=actor,
         command=_execution_command(actor, skill),
     )
     runtime = PostgresBuiltinExecutionRuntime(
         runtime_connect=postgres_connections["app"],
-        clock=lambda: NOW,
+        clock=lambda: issued_baseline,
         ids=_ids(),
-        lease_duration=timedelta(minutes=3),
     )
-    invoked = False
+    result = runtime.invoke(actor_context=actor, authorization=authorization)
+    assert result.replayed is False
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT issued_at < lease_expires_at, "
+            "lease_expires_at < (grant_json->>'expires_at')::timestamptz "
+            "FROM gah_builtin_execution_state WHERE tenant_id=%s AND actor_id=%s AND operation_id=%s",
+            (actor["tenant_id"], actor["actor_id"], authorization.command["operation_id"]),
+        )
+        assert cursor.fetchone() == (True, True)
 
-    def record_invoke(_registry, *, request):
-        nonlocal invoked
-        del request
-        invoked = True
-        raise AssertionError("handler must not run beyond the authorization window")
 
+def test_direct_begin_rejects_submicrosecond_and_oversized_lease_without_mutation(
+    postgres_connections,
+):
+    """A rounded-to-now lease must fail before it writes the intent or state."""
+
+    actor, skill = _persisted_skill(postgres_connections)
+    authorization = _authority(postgres_connections).issue(
+        actor_context=actor,
+        command=_execution_command(actor, skill, operation_id="phase5-no-positive-lease"),
+    )
+    command = authorization.command
+    payload = {
+        "actor_id": actor["actor_id"],
+        "operation_id": command["operation_id"],
+        "operation_digest": command["operation_digest"],
+        "authorization_grant_digest": sha256_digest(authorization.grant),
+        "skill_id": command["skill_id"],
+        "revision": command["revision"],
+        "artifact_digest": command["artifact_digest"],
+        "state": "executing",
+    }
     before = _snapshot(postgres_connections)
-    with patch.object(BuiltinHandlerRegistry, "invoke", new=record_invoke):
-        with pytest.raises(Exception):
-            runtime.invoke(actor_context=actor, authorization=authorization)
 
-    assert invoked is False
+    def begin(lease_seconds: float) -> None:
+        with postgres_connections["app"]() as connection, connection.cursor() as cursor:
+            intent = execution_module._build_evidence(
+                actor=actor,
+                run_id=command["tool_request"]["run_id"],
+                event_kind="execution.intent",
+                policy=command["policy_decision"],
+                payload=payload,
+                head=execution_module._head(cursor, actor, command["tool_request"]["run_id"]),
+                clock=lambda: NOW,
+                ids=_ids(),
+            )
+            cursor.execute(
+                "SELECT gah_begin_builtin_execution(%s::jsonb,%s::jsonb,%s::jsonb,%s)",
+                (
+                    execution_module._json(actor),
+                    execution_module._json(
+                        {
+                            "operation_id": command["operation_id"],
+                            "operation_digest": command["operation_digest"],
+                            "command": command,
+                            "grant": authorization.grant,
+                        }
+                    ),
+                    execution_module._json(intent),
+                    lease_seconds,
+                ),
+            )
+
+    with pytest.raises(Exception, match="no positive fenced lease window"):
+        begin(5e-324)
+    assert _snapshot(postgres_connections) == before
+    with pytest.raises(Exception, match="bounded runtime path"):
+        begin(300.0000001)
     assert _snapshot(postgres_connections) == before
 
 
@@ -3333,6 +3480,13 @@ def test_rebuild_preserves_live_execution_and_projection_loss_is_recovery_only(
     )
     assert rebuilt.replayed is True
     assert _snapshot(postgres_connections)[1] == evidence_before
+    assert authorization.command["tool_request"]["arguments"]["input"] == dict(
+        execution_module.BUILTIN_ECHO_INPUT
+    )
+    assert rebuilt.command["tool_request"]["arguments"]["input"] == dict(
+        execution_module.BUILTIN_ECHO_INPUT
+    )
+    assert "must-not-persist" not in json.dumps(_snapshot(postgres_connections), sort_keys=True)
 
     recovered = runtime.recover(actor_context=actor, authorization=rebuilt)
     assert recovered.outcome["status"] == "indeterminate"

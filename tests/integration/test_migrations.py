@@ -1501,6 +1501,7 @@ def test_phase16_upgrade_preserves_populated_internally_bound_actor_state(
             "run_id": run,
             "request_id": request,
             "request_digest": request_digest,
+            "arguments": {"input": {"message": "gah.builtin.echo.v1"}},
         },
     }
     with connect() as connection, connection.cursor() as cursor:
@@ -1561,6 +1562,120 @@ def test_phase16_upgrade_preserves_populated_internally_bound_actor_state(
             command,
             grant,
         )
+
+
+def test_phase16_upgrade_rejects_rebound_sentinel_echo_input_atomically(
+    migration_database: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """0016 must reject a legacy row whose only changed binding is echo input."""
+
+    import governed_agent_harness.persistence.migration as migration_module
+
+    packaged = discover_migrations()
+    phase15 = tuple(item for item in packaged if item.version <= 15)
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase15)
+    connect = migration_database["connect"]
+    apply_migrations(admin_connect=connect)
+    tenant = "018f0000-0000-7000-8000-000000000001"
+    actor = "018f0000-0000-7000-8000-000000000002"
+    run = "018f0000-0000-7000-8000-000000000003"
+    operation = "phase16-sentinel-input-row"
+    operation_digest = "sha256:" + "1" * 64
+    request = "018f0000-0000-7000-8000-000000000004"
+    request_digest = "sha256:" + "2" * 64
+    grant_id = "018f0000-0000-7000-8000-000000000005"
+    skill = "018f0000-0000-7000-8000-000000000006"
+    artifact_digest = "sha256:" + "3" * 64
+    grant = {
+        "tenant_id": tenant,
+        "actor_id": actor,
+        "run_id": run,
+        "request_id": request,
+        "request_digest": request_digest,
+        "grant_id": grant_id,
+    }
+    command = {
+        "operation_id": operation,
+        "operation_digest": operation_digest,
+        "skill_id": skill,
+        "revision": 1,
+        "artifact_digest": artifact_digest,
+        "tool_request": {
+            "tenant_id": tenant,
+            "actor_id": actor,
+            "run_id": run,
+            "request_id": request,
+            "request_digest": request_digest,
+            "arguments": {"input": {"message": "gah.builtin.echo.v1"}},
+        },
+    }
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT gah_canonical_sha256(%s::jsonb)", (json.dumps(grant),))
+        grant_digest = cursor.fetchone()[0]
+        issuance = {
+            "tenant_id": tenant,
+            "draft": {
+                "tenant_id": tenant,
+                "run_id": run,
+                "inline_payload": {
+                    "actor_id": actor,
+                    "operation_id": operation,
+                    "operation_digest": operation_digest,
+                    "command": command,
+                    "authorization_grant": grant,
+                    "authorization_grant_digest": grant_digest,
+                },
+            },
+        }
+        cursor.execute(
+            "INSERT INTO gah_builtin_execution_state ("
+            "tenant_id,actor_id,run_id,operation_id,operation_digest,request_id,"
+            "request_digest,grant_id,grant_digest,skill_id,revision,artifact_digest,"
+            "command_json,grant_json,state,issuance_evidence_json,issued_at) VALUES "
+            "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s::jsonb,%s::jsonb,"
+            "'authorized',%s::jsonb,%s::timestamptz)",
+            (
+                tenant,
+                actor,
+                run,
+                operation,
+                operation_digest,
+                request,
+                request_digest,
+                grant_id,
+                grant_digest,
+                skill,
+                artifact_digest,
+                json.dumps(command),
+                json.dumps(grant),
+                json.dumps(issuance),
+                "2026-01-01T00:00:00.000Z",
+            ),
+        )
+        sentinel = {"sentinel": "must-not-persist"}
+        cursor.execute(
+            "UPDATE gah_builtin_execution_state SET "
+            "command_json=jsonb_set(command_json,'{tool_request,arguments,input}',%s::jsonb), "
+            "issuance_evidence_json=jsonb_set("
+            "issuance_evidence_json,'{draft,inline_payload,command,tool_request,arguments,input}',"
+            "%s::jsonb) WHERE tenant_id=%s AND operation_id=%s",
+            (json.dumps(sentinel), json.dumps(sentinel), tenant, operation),
+        )
+        assert cursor.rowcount == 1
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
+    with pytest.raises(Exception, match="cannot migrate ambiguous execution actor bindings"):
+        apply_migrations(admin_connect=connect)
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT (SELECT max(version) FROM gah_schema_migrations), "
+            "command_json#>'{tool_request,arguments,input}', "
+            "issuance_evidence_json#>'{draft,inline_payload,command,tool_request,arguments,input}', "
+            "to_regprocedure('gah_builtin_execution_state_actor_binding_valid("
+            "text,text,text,text,text,text,text,text,text,text,integer,text,jsonb,jsonb,jsonb)') "
+            "FROM gah_builtin_execution_state WHERE tenant_id=%s AND operation_id=%s",
+            (tenant, operation),
+        )
+        assert cursor.fetchone() == (15, sentinel, sentinel, None)
 
 
 def test_phase16_principal_entry_lock_waits_before_actor_binding_preflight(
@@ -1650,6 +1765,7 @@ def test_phase16_tenant_global_grant_rejects_second_actor_bound_state(
                 "run_id": run,
                 "request_id": request,
                 "request_digest": request_digest,
+                "arguments": {"input": {"message": "gah.builtin.echo.v1"}},
             },
         }
         return (

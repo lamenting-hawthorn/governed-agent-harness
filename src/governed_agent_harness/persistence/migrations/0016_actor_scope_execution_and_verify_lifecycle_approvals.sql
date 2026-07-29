@@ -35,6 +35,8 @@ BEGIN
           OR p_command->>'revision' !~ '^[1-9][0-9]{0,8}$'
           OR (p_command->>'revision')::integer IS DISTINCT FROM p_revision
           OR p_command->>'artifact_digest' IS DISTINCT FROM p_artifact_digest
+          OR p_command#>'{tool_request,arguments,input}' IS DISTINCT FROM
+                '{"message":"gah.builtin.echo.v1"}'::jsonb
           OR p_grant_json->>'tenant_id' IS DISTINCT FROM p_tenant
           OR p_grant_json->>'actor_id' IS DISTINCT FROM p_actor
           OR p_grant_json->>'run_id' IS DISTINCT FROM p_run

@@ -159,7 +159,8 @@ adversarial coverage remains a required deployment gate.
 ## Bounded built-in execution admission (Phase 5.1)
 
 The runtime may invoke only `gah.builtin.echo@1.0.0`, selected from a static host
-registry by the exact active artifact digest. The handler is pure, deterministic,
+registry by the exact active artifact digest. Its sole accepted input is the public
+synthetic object `{ "message": "gah.builtin.echo.v1" }`. The handler is pure, deterministic,
 and preinstalled; it has no network, filesystem, provider, secret, package, or
 stored-artifact execution path.
 

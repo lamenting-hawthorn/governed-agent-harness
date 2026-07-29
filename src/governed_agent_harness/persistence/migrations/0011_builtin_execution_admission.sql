@@ -969,6 +969,8 @@ BEGIN
        OR request#>>'{arguments,revision}' !~ '^[1-9][0-9]*$'
        OR pg_catalog.octet_length(
             public.gah_canonical_json(request#>'{arguments,input}')) > 16384
+       OR request#>'{arguments,input}' IS DISTINCT FROM
+            '{"message":"gah.builtin.echo.v1"}'::jsonb
     THEN RAISE EXCEPTION 'execution arguments are malformed or oversized'; END IF;
     PERFORM public.gah_builtin_execution_assert_object(
         request->'idempotency',
@@ -1721,6 +1723,8 @@ DECLARE
     stored public.gah_builtin_execution_state%ROWTYPE;
     active public.gah_active_skill_projection%ROWTYPE;
     payload jsonb := p_intent#>'{draft,inline_payload}';
+    lease_now timestamptz;
+    lease_deadline timestamptz;
 BEGIN
     PERFORM public.gah_builtin_execution_assert_actor(p_actor);
     PERFORM public.gah_builtin_execution_assert_object(
@@ -1784,6 +1788,13 @@ BEGIN
        OR (stored.command_json#>>'{retention,expires_at}')::timestamptz
             <= clock_timestamp()
     THEN RAISE EXCEPTION 'execution consume binding is stale or expired'; END IF;
+    lease_now := clock_timestamp();
+    lease_deadline := LEAST(
+        lease_now+(p_lease_seconds*interval '1 second'),
+        (stored.grant_json->>'expires_at')::timestamptz - interval '1 millisecond'
+    );
+    IF lease_deadline <= lease_now
+    THEN RAISE EXCEPTION 'execution consume has no positive fenced lease window'; END IF;
     IF payload <> jsonb_build_object(
         'actor_id',stored.actor_id,'operation_id',stored.operation_id,
         'operation_digest',stored.operation_digest,
@@ -1797,7 +1808,7 @@ BEGIN
     UPDATE public.gah_builtin_execution_state
        SET state='executing',version=version+1,intent_evidence_json=p_intent,
            execution_attempt_id=p_intent->>'envelope_id',owner_generation=1,
-           lease_expires_at=clock_timestamp()+(p_lease_seconds*interval '1 second')
+           lease_expires_at=lease_deadline
      WHERE tenant_id=stored.tenant_id AND operation_id=stored.operation_id
      RETURNING * INTO stored;
     RETURN jsonb_build_object(

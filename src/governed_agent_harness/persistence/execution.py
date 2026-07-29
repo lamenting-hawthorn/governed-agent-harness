@@ -15,6 +15,7 @@ import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from types import MappingProxyType
 from typing import Any, Protocol
 
 from governed_agent_harness.contracts import (
@@ -31,7 +32,6 @@ from governed_agent_harness.contracts import (
     ToolRequest,
     TrustContext,
     apply_object_digest,
-    canonical_bytes,
     sha256_digest,
     unsigned_body,
     validate_approval_binding,
@@ -50,7 +50,7 @@ BUILTIN_ECHO_ARTIFACT_DIGEST = (
     "sha256:be4c49fbd64577c93908f9c49d3a4625e52c216bac4703be737fc2e080f4c9a7"
 )
 _GRANT_TTL = timedelta(minutes=5)
-_INPUT_LIMIT = 16_384
+BUILTIN_ECHO_INPUT = MappingProxyType({"message": "gah.builtin.echo.v1"})
 
 
 class ExecutionAdmissionError(SemanticError):
@@ -116,16 +116,19 @@ class BuiltinHandlerRegistry:
             or arguments["artifact_digest"] != active.artifact_digest
         ):
             raise ExecutionAdmissionError("request is not bound to the active built-in handler")
-        value = arguments["input"]
-        if not isinstance(value, Mapping):
-            raise ExecutionAdmissionError("built-in echo input must be an object")
-        if len(canonical_bytes(value)) > _INPUT_LIMIT:
-            raise ExecutionAdmissionError("built-in echo input exceeds the bounded size limit")
+        self._validate_input(arguments["input"])
+
+    @staticmethod
+    def _validate_input(value: Any) -> None:
+        if not isinstance(value, Mapping) or dict(value) != BUILTIN_ECHO_INPUT:
+            raise ExecutionAdmissionError("built-in echo input is not the fixed synthetic value")
 
     def invoke(self, *, request: Mapping[str, Any]) -> dict[str, Any]:
         """Invoke exactly one pure preinstalled handler."""
 
-        return {"echo": copy.deepcopy(dict(request["arguments"]["input"]))}
+        value = request["arguments"]["input"]
+        self._validate_input(value)
+        return {"echo": dict(BUILTIN_ECHO_INPUT)}
 
 
 _STATIC_BUILTIN_REGISTRY = BuiltinHandlerRegistry()
