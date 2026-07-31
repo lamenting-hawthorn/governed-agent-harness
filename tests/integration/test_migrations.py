@@ -70,6 +70,7 @@ def test_packaged_migrations_are_contiguous_and_checksum_exact() -> None:
         (15, "0015_verify_lifecycle_receipts_and_harden_execution.sql"),
         (16, "0016_actor_scope_execution_and_verify_lifecycle_approvals.sql"),
         (17, "0017_validate_lifecycle_actor_and_policy_bounds.sql"),
+        (18, "0018_governed_github_markdown_knowledge.sql"),
     ]
     assert migrations[0].checksum.startswith("sha256:")
     assert len(migrations[0].checksum) == 71
@@ -125,6 +126,60 @@ def test_fresh_install_registers_migration_and_is_idempotent(
     assert rows == [(item.version, item.checksum, True) for item in first]
     assert second == first
     assert all(table is not None for table in tables)
+
+
+def test_phase18_upgrade_installs_private_actor_scoped_knowledge_boundary(
+    migration_database: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Upgrade a real phase-17 database and fingerprint the new authority boundary."""
+
+    import governed_agent_harness.persistence.migration as migration_module
+
+    connect = migration_database["connect"]
+    assert callable(connect)
+    packaged = discover_migrations()
+    phase17 = tuple(migration for migration in packaged if migration.version <= 17)
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase17)
+    assert apply_migrations(admin_connect=connect) == phase17
+
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
+    assert apply_migrations(admin_connect=connect)[-1].version == 18
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT relname, relrowsecurity, relforcerowsecurity, pg_get_userbyid(relowner) "
+            "FROM pg_class WHERE relname IN "
+            "('gah_github_markdown_sources', 'gah_github_markdown_revisions', "
+            "'gah_github_markdown_operations') "
+            "ORDER BY relname"
+        )
+        assert cursor.fetchall() == [
+            ("gah_github_markdown_operations", True, True, "gah_schema_owner"),
+            ("gah_github_markdown_revisions", True, True, "gah_schema_owner"),
+            ("gah_github_markdown_sources", True, True, "gah_schema_owner"),
+        ]
+        cursor.execute(
+            "SELECT "
+            "has_table_privilege('gah_runtime', 'public.gah_github_markdown_sources', 'select'), "
+            "has_table_privilege('gah_authority_writer', 'public.gah_github_markdown_sources', 'select'), "
+            "has_table_privilege('gah_runtime', 'public.gah_github_markdown_revisions', 'select'), "
+            "has_table_privilege('gah_authority_writer', 'public.gah_github_markdown_revisions', 'select'), "
+            "has_table_privilege('gah_runtime', 'public.gah_github_markdown_operations', 'select'), "
+            "has_table_privilege('gah_authority_writer', 'public.gah_github_markdown_operations', 'select')"
+        )
+        assert cursor.fetchone() == (False, False, False, False, False, False)
+        cursor.execute(
+            "SELECT "
+            "has_function_privilege('gah_runtime', "
+            "'public.gah_import_github_markdown(jsonb,jsonb,jsonb)', 'execute'), "
+            "has_function_privilege('gah_authority_writer', "
+            "'public.gah_import_github_markdown(jsonb,jsonb,jsonb)', 'execute'), "
+            "has_function_privilege('gah_authority_writer', "
+            "'public.gah_github_markdown_reserve_operation(jsonb,text,text,text,text)', 'execute'), "
+            "has_function_privilege('gah_runtime', "
+            "'public.gah_retrieve_github_markdown(jsonb,text,integer)', 'execute')"
+        )
+        assert cursor.fetchone() == (False, True, False, True)
+    assert apply_migrations(admin_connect=connect)[-1].version == 18
 
 
 @pytest.mark.parametrize(
@@ -805,7 +860,7 @@ def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
             return
         monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
         applied = apply_migrations(admin_connect=connect)
-        assert applied[-1].version == 17
+        assert applied[-1].version == 18
         with connect() as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT count(*), min(evidence_event_digest) FROM gah_skill_lifecycle_transitions"
@@ -1019,6 +1074,7 @@ def test_advisory_lock_serializes_concurrent_fresh_installers(
         (15, 1),
         (16, 1),
         (17, 1),
+        (18, 1),
     ]
 
 
@@ -1215,10 +1271,10 @@ def test_checksum_drift_and_unknown_version_are_rejected(
             (discover_migrations()[0].checksum,),
         )
         cursor.execute(
-            "INSERT INTO gah_schema_migrations (version, checksum) VALUES (18, %s)",
+            "INSERT INTO gah_schema_migrations (version, checksum) VALUES (19, %s)",
             ("sha256:" + "1" * 64,),
         )
-    with pytest.raises(MigrationError, match="unknown migration version 0018"):
+    with pytest.raises(MigrationError, match="unknown migration version 0019"):
         apply_migrations(admin_connect=connect)
 
 
@@ -1676,7 +1732,7 @@ def test_phase16_upgrade_preserves_populated_internally_bound_actor_state(
             ),
         )
     monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
-    assert apply_migrations(admin_connect=connect)[-1].version == 17
+    assert apply_migrations(admin_connect=connect)[-1].version == 18
     with connect() as connection, connection.cursor() as cursor:
         cursor.execute(
             "SELECT tenant_id,actor_id,operation_id,grant_digest,command_json,grant_json "
@@ -1840,7 +1896,7 @@ def test_phase16_principal_entry_lock_waits_before_actor_binding_preflight(
                 time.sleep(0.01)
             assert waiting and not upgrade.done(), "0016 did not wait on principal entry"
             reader.commit()
-            assert upgrade.result(timeout=8)[-1].version == 17
+            assert upgrade.result(timeout=8)[-1].version == 18
     finally:
         reader.rollback()
         reader_cursor.close()
@@ -2172,8 +2228,8 @@ def test_failed_migration_rolls_back_registry_and_schema(
 
     packaged = discover_migrations()
     broken = Migration(
-        version=18,
-        name="0018_broken.sql",
+        version=19,
+        name="0019_broken.sql",
         checksum="sha256:" + "2" * 64,
         sql="CREATE TABLE gah_partial (id integer); SELECT definitely_not_a_function()",
     )

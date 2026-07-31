@@ -147,10 +147,19 @@ not mutable array position alone.
 
 ## Provider boundary
 
-This repository currently ships only the optional PostgreSQL read path above.
-No local PGlite provider, hosted deployment, or external provider adapter is
-implemented. Any future provider must retain the narrow actor-context boundary
-and cannot bypass promotion policy or ledger events.
+The optional PostgreSQL store now also implements one bounded external-source
+adapter: a single actor may import a Markdown file per bounded request from an
+injected, application-owned GitHub reader only when the request names a full
+immutable commit SHA. It stores immutable revisions and source/revocation
+evidence, and returns actor-scoped citations as untrusted context. Replay is
+accepted only for an identical import binding; expired or revoked revisions are
+not returned. It deliberately has no HTTP client, credentials, background sync,
+shared ACLs, physical deletion, automatic linking or promotion, or MCP
+transport. See [Governed GitHub Markdown knowledge](GITHUB_MARKDOWN_KNOWLEDGE.md).
+
+No local PGlite provider or hosted deployment is implemented. Any future
+provider must retain the narrow actor-context boundary and cannot bypass
+promotion policy or ledger events.
 
 Provider capability manifests declare:
 

@@ -158,7 +158,9 @@ def postgres_connections(postgres_server: dict[str, str], tmp_path: Path):
     reset.autocommit = True
     with reset.cursor() as cursor:
         cursor.execute(
-            "TRUNCATE gah_builtin_execution_state, "
+            "TRUNCATE gah_github_markdown_revisions, gah_github_markdown_sources, "
+            "gah_github_markdown_operations, "
+            "gah_builtin_execution_state, "
             "gah_active_skill_projection, gah_skill_projection_rebuilds, "
             "gah_skill_lifecycle_transitions, "
             "gah_skill_artifact_revisions, gah_memory_transitions, gah_grant_consumptions, "

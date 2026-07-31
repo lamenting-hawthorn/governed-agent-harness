@@ -35,9 +35,13 @@ transport, storage product, or learning workflow.
 > Phase 5.1 composes that resolver with one authority-issued, single-use,
 > expiring authorization and exactly one preinstalled deterministic echo
 > handler selected by a static host registry. Stored artifact text is never
-> interpreted or executed. `isolation_profile="none"` is not a sandbox.
-> Provider effects, transports, general sandboxing, and hosted
-> operations remain out of scope. This repository is not production-ready.
+> interpreted or executed. Phase 5.2 adds one actor-scoped, immutable GitHub
+> Markdown knowledge source through an application-injected, credential-free
+> pinned reader, evidence-backed durable revisions, logical source revocation,
+> cited read-only PostgreSQL retrieval, and an explicitly untrusted resource
+> shape. `isolation_profile="none"` is not a sandbox. Provider effects,
+> transports, general sandboxing, and hosted operations remain out of scope.
+> This repository is not production-ready.
 
 ## Why this exists
 
@@ -93,6 +97,7 @@ flowchart LR
 | Governed memory promotion | Implemented, bounded | Actor-only PostgreSQL authority path with exact proposal/evidence/policy/approval bindings, atomic evidence and revision persistence, replay, concurrency, tombstones, restart, rebuild, forced RLS, and runtime denial |
 | Governed inert skill lifecycle | Implemented, bounded | Actor-only PostgreSQL install/activate/rollback/deactivate/rebuild authority; immutable inline JSON artifacts, canonical evidence, replay/concurrency, forced RLS, role separation, restart/rebuild, and runtime-only exact active-digest resolution |
 | Built-in execution admission | Implemented, narrowly bounded | Exact active digest plus request/policy/gate/approval/evidence/validity/retention binding; authority-only five-minute grant issuance; runtime-only single-use consume; one static deterministic echo handler; canonical intent/outcome evidence; replay, fencing, recovery, and rebuild |
+| Pinned GitHub Markdown knowledge | Implemented, narrowly bounded | One actor-scoped Markdown file at a full immutable SHA through an injected credential-free reader; exact policy/evidence binding, immutable revisions, logical revocation, cited untrusted PostgreSQL retrieval, and runtime/authority separation; no live GitHub connector or MCP transport |
 | CLI, SDK, HTTP/MCP, and hosted operations | Planned | Requires feature-level integration evidence |
 
 ## Contract foundation
