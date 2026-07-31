@@ -12,6 +12,7 @@ All links below resolve within this fresh repository.
 - [Integrations](INTEGRATIONS.md)
 - [Memory and knowledge](MEMORY_AND_KNOWLEDGE.md)
 - [Governed GitHub Markdown knowledge](GITHUB_MARKDOWN_KNOWLEDGE.md)
+- [Local-first MCP roadmap](LOCAL_FIRST_MCP_ROADMAP.md)
 - [Skills](SKILLS.md)
 - [Evaluation and learning](EVALUATION_AND_LEARNING.md)
 

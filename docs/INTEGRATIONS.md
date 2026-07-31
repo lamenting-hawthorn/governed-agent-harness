@@ -83,23 +83,30 @@ position.
 HTTP handlers call the same application commands as the SDK. Administrative
 routes use separate scopes and cannot be invoked with run-only credentials.
 
-### MCP
+### MCP (planned, local-first)
 
-MCP maps selected commands and queries into tools and resources:
+No MCP transport is implemented. The Phase 5.2 resource shape is an internal
+read-only response, not an MCP server.
 
-- resources for capabilities, run summaries, approved memory, and skill
-  metadata;
-- tools for starting/cancelling runs, proposing memory, requesting retrieval,
-  and resolving approvals where policy permits;
-- prompts only as convenience templates, never authority.
+The first MCP integration is a local `stdio`, read-only adapter over the
+canonical retrieval application service. It exposes only actor-scoped cited
+knowledge resources and, if needed, one bounded read-only search tool. It does
+not expose raw ledger payloads, secrets, unrestricted search, source import,
+memory promotion, approval resolution, or any other write path.
 
-MCP input is untrusted. The server authenticates its peer where the transport
-supports it and maps the session to an `ActorContext`. Stdio defaults to local
-OS ownership; remote MCP requires authenticated transport. Tool descriptions
-must clearly state effects and approval behavior.
+MCP input is untrusted. The local adapter derives actor context from local
+process ownership and explicit project configuration, never from tool
+arguments. Remote MCP is a later deployment profile: it authenticates every
+request, maps credentials to canonical actor and tenant context, and does not
+forward its tokens to a connector or another server. In either profile, MCP is
+an Observe/Advise transport, not evidence that host-native tools are governed.
 
-MCP does not expose raw ledger payloads, secrets, or unrestricted memory search
-without explicit scopes.
+The protocol baseline is the [MCP 2026-07-28
+specification](https://modelcontextprotocol.io/specification/2026-07-28).
+Capabilities, discovery, resources, tools, cache behavior, and telemetry are
+implemented only when tested. Tasks, Apps, remote transport, and write tools
+are deliberately deferred. The full sequence and gates are in the
+[Local-first MCP roadmap](LOCAL_FIRST_MCP_ROADMAP.md).
 
 ## Storage adapters
 

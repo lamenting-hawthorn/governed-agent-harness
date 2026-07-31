@@ -51,7 +51,8 @@ automatic memory promotion, embeddings, cross-actor sharing, an MCP server, or
 hosted operations. `as_read_only_mcp_resource()` is a transport-neutral resource
 shape, not an MCP transport implementation.
 
-The next expansion must add a secret-broker and connector authority boundary
-before any live GitHub API client, then prove source-ACL, deletion, retention,
-and revocation propagation before adding background synchronization or further
-SaaS sources.
+The approved delivery sequence is [local read-only MCP
+first](LOCAL_FIRST_MCP_ROADMAP.md), then a local Git-checkout adapter, and only
+then a secret-broker and connector-authority boundary for any live GitHub API
+client. Source-ACL, deletion, retention, and revocation propagation must be
+proven before background synchronization or further SaaS sources.

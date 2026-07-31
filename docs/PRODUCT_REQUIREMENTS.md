@@ -143,6 +143,13 @@ Normative words **MUST**, **SHOULD**, and **MAY** follow RFC 2119 usage.
   versions and machine-readable compatibility constraints.
 - **FR-073:** Programmatic interfaces MUST provide structured errors with stable
   codes, correlation identifiers, and safe messages.
+- **FR-074:** The first MCP profile MUST be local `stdio` and read-only. It MUST
+  expose only actor-scoped cited retrieval through canonical query operations;
+  it MUST NOT expose source import, memory promotion, approval resolution, raw
+  evidence, or another write path.
+- **FR-075:** A remote MCP profile MUST authenticate each request and derive
+  actor and tenant context from its credentials. Tokens MUST be audience-bound
+  to this server and MUST NOT be forwarded to connectors or other MCP servers.
 
 ## Non-functional requirements
 
@@ -192,6 +199,9 @@ Normative words **MUST**, **SHOULD**, and **MAY** follow RFC 2119 usage.
   without leaking restricted content.
 - **NFR-033:** `doctor`, run inspection, and safe diagnostics export MUST support
   diagnosis without exposing secrets or private trace content by default.
+- **NFR-034:** A managed or self-hosted deployment MUST NOT add an authorization,
+  policy, evidence, or data-access semantic that is absent from the documented
+  local contract. Deployment-specific capabilities MUST be explicit and tested.
 
 ### Maintainability and quality
 
