@@ -52,7 +52,12 @@ def _ids():
     return next_id
 
 
-def _source(*, commit_sha: str = "a" * 40, content: str | None = None) -> PinnedGithubMarkdown:
+def _source(
+    *,
+    commit_sha: str = "a" * 40,
+    content: str | None = None,
+    retention_expires_at: str | None = None,
+) -> PinnedGithubMarkdown:
     return PinnedGithubMarkdown(
         repository="acme/brain",
         commit_sha=commit_sha,
@@ -60,7 +65,8 @@ def _source(*, commit_sha: str = "a" * 40, content: str | None = None) -> Pinned
         content=content
         or "# Roadmap\n\nThe governed knowledge path returns cited untrusted context.\n",
         classification="internal",
-        retention_expires_at="2027-01-01T00:00:00.000Z",
+        retention_expires_at=retention_expires_at
+        or _timestamp(datetime.now(timezone.utc) + timedelta(days=30)),
     )
 
 
@@ -156,13 +162,14 @@ def test_pinned_fetch_accepts_only_a_full_commit_and_exposes_no_credential_param
             return "# Pinned\n"
 
     client = RecordingClient()
+    retention_expires_at = _timestamp(datetime.now(timezone.utc) + timedelta(days=30))
     fetched = PinnedGithubMarkdown.fetch(
         client=client,
         repository="acme/brain",
         commit_sha="c" * 40,
         path="docs/pinned.md",
         classification="internal",
-        retention_expires_at="2027-01-01T00:00:00.000Z",
+        retention_expires_at=retention_expires_at,
     )
     assert fetched.content == "# Pinned\n"
     assert calls == [("acme/brain", "c" * 40, "docs/pinned.md")]
@@ -173,9 +180,77 @@ def test_pinned_fetch_accepts_only_a_full_commit_and_exposes_no_credential_param
             commit_sha="main",
             path="docs/pinned.md",
             classification="internal",
-            retention_expires_at="2027-01-01T00:00:00.000Z",
+            retention_expires_at=retention_expires_at,
         )
     assert calls == [("acme/brain", "c" * 40, "docs/pinned.md")]
+
+
+@pytest.mark.parametrize(
+    ("classification", "retention_expires_at", "message"),
+    (
+        ("unexpected", "2030-01-01T00:00:00.000Z", "classification is unsupported"),
+        (None, "2030-01-01T00:00:00.000Z", "classification is unsupported"),
+        ("internal", "2030-02-30T00:00:00.000Z", "retention expiry is malformed"),
+        ("internal", "2000-01-01T00:00:00.000Z", "retention expiry is expired"),
+    ),
+)
+def test_pinned_fetch_rejects_invalid_metadata_before_reading_the_client(
+    classification: object, retention_expires_at: str, message: str
+):
+    calls: list[tuple[str, str, str]] = []
+
+    class RecordingClient:
+        def read_markdown(self, *, repository: str, commit_sha: str, path: str) -> str:
+            calls.append((repository, commit_sha, path))
+            return "# Pinned\n"
+
+    with pytest.raises(GithubMarkdownSourceError, match=message):
+        PinnedGithubMarkdown.fetch(
+            client=RecordingClient(),
+            repository="acme/brain",
+            commit_sha="c" * 40,
+            path="docs/pinned.md",
+            classification=classification,  # type: ignore[arg-type]
+            retention_expires_at=retention_expires_at,
+        )
+    assert calls == []
+
+
+def test_pinned_fetch_rejects_retention_deadline_equal_to_the_local_clock_before_reading():
+    calls: list[tuple[str, str, str]] = []
+
+    class RecordingClient:
+        def read_markdown(self, *, repository: str, commit_sha: str, path: str) -> str:
+            calls.append((repository, commit_sha, path))
+            return "# Pinned\n"
+
+    with pytest.raises(GithubMarkdownSourceError, match="retention expiry is expired"):
+        PinnedGithubMarkdown.fetch(
+            client=RecordingClient(),
+            repository="acme/brain",
+            commit_sha="c" * 40,
+            path="docs/pinned.md",
+            classification="internal",
+            retention_expires_at=_timestamp(datetime.now(timezone.utc)),
+        )
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "credential",
+    (
+        "".join(("xox", "b-", "123456789012-abcdefghijklmnopqrstuvwxyz")),
+        "".join(("sk", "_live_", "abcdefghijklmnopqrstuvwxyz0123456789")),
+        "api_key=abcdefghijklmnopqrstuvwxyz0123456789",
+        '{"password":"supersecret"}',
+        'password = "supersecret"',
+        'authorization = "Bearer abcdefghijklmnop"',
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhY3RvciJ9.c2lnbmF0dXJlMTIzNDU2Nzg5",
+    ),
+)
+def test_pinned_source_rejects_common_credential_material(credential: str):
+    with pytest.raises(GithubMarkdownSourceError, match="credential material"):
+        _source(content=f"credential {credential}\n").validate()
 
 
 def test_import_retrieve_revision_replay_and_read_only_mcp_shape(postgres_connections):
@@ -228,6 +303,70 @@ def test_import_retrieve_revision_replay_and_read_only_mcp_shape(postgres_connec
     events = _runtime_events(postgres_connections, actor=actor, run_id=actor["session_id"])
     assert source.content not in json.dumps(events)
     assert events[0]["draft"]["inline_payload"]["source"] == _evidence_source_metadata(source)
+
+
+def test_import_returns_one_cited_result_when_retention_expires_during_the_statement(
+    postgres_connections,
+):
+    """A statement-stable expiry check cannot commit an import then report it malformed."""
+
+    actor = _live_actor(postgres_connections)
+    with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "CREATE FUNCTION public.gah_test_delay_github_markdown_revision_insert() "
+            "RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public AS "
+            "$$ BEGIN PERFORM pg_catalog.pg_sleep(GREATEST(0::double precision, "
+            "EXTRACT(EPOCH FROM (NEW.retention_expires_at + interval '100 milliseconds' "
+            "- pg_catalog.clock_timestamp()))::double precision)); RETURN NEW; END $$"
+        )
+        cursor.execute(
+            "CREATE TRIGGER gah_test_delay_github_markdown_revision_insert "
+            "BEFORE INSERT ON public.gah_github_markdown_revisions "
+            "FOR EACH ROW EXECUTE FUNCTION "
+            "public.gah_test_delay_github_markdown_revision_insert()"
+        )
+        cursor.execute("SELECT pg_catalog.clock_timestamp()")
+        retention_expires_at = _timestamp(cursor.fetchone()[0] + timedelta(seconds=2))
+
+    try:
+        source = _source(retention_expires_at=retention_expires_at)
+        operation_id = "018f0000-0000-7000-8000-00000000c009"
+        imported = _authority(postgres_connections).import_markdown(
+            actor_context=actor,
+            operation_id=operation_id,
+            run_id=actor["session_id"],
+            source=source,
+            policy_decision=_policy(
+                actor,
+                operation_id=operation_id,
+                operation_digest=source.operation_digest(operation_id),
+                decision_id="018f0000-0000-7000-8000-00000000c010",
+            ),
+        )
+        assert imported.replayed is False
+        assert imported.result.content == source.content
+        assert _counts(postgres_connections) == (1, 1, 1)
+        with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_catalog.clock_timestamp() > %s::timestamptz",
+                (retention_expires_at,),
+            )
+            assert cursor.fetchone()[0] is True
+        assert (
+            PostgresGithubMarkdownReader(runtime_connect=postgres_connections["app"]).retrieve(
+                actor_context=actor, query="cited untrusted"
+            )
+            == ()
+        )
+    finally:
+        with postgres_connections["admin"]() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "DROP TRIGGER IF EXISTS gah_test_delay_github_markdown_revision_insert "
+                "ON public.gah_github_markdown_revisions"
+            )
+            cursor.execute(
+                "DROP FUNCTION IF EXISTS public.gah_test_delay_github_markdown_revision_insert()"
+            )
 
 
 def test_changed_pinned_commit_is_immutable_revision_and_revocation_hides_all_versions(
@@ -364,7 +503,10 @@ def test_replay_requires_the_full_import_binding_and_expired_revisions_never_ret
         (
             "018f0000-0000-7000-8000-00000000c039",
             actor["session_id"],
-            replace(source, retention_expires_at="2028-01-01T00:00:00.000Z"),
+            replace(
+                source,
+                retention_expires_at=_timestamp(datetime.now(timezone.utc) + timedelta(days=60)),
+            ),
             None,
             "binding conflicts",
         ),
@@ -645,35 +787,44 @@ def test_secret_like_content_and_direct_sql_runtime_bypass_fail_without_mutation
     )
     before = _counts(postgres_connections)
 
-    poisoned_source = source.to_dict()
-    poisoned_source["content"] = "token ghp_abcdefghijklmnopqrstuvwxyz0123456789ABCDEF\n"
-    poisoned_source["content_digest"] = sha256_digest(
-        {"content": poisoned_source["content"], "media_type": "text/markdown"}
-    )
-    poisoned_operation = "018f0000-0000-7000-8000-00000000c024"
-    poisoned_payload = {
-        "operation_id": poisoned_operation,
-        "operation_digest": sha256_digest(
-            {"operation_id": poisoned_operation, "source": poisoned_source}
+    for poison_number, content in enumerate(
+        (
+            "credential " + "sk" + "_live_" + "abcdefghijklmnopqrstuvwxyz0123456789\n",
+            '{"password":"supersecret"}\n',
+            'password = "supersecret"\n',
+            'authorization = "Bearer abcdefghijklmnop"\n',
         ),
-        "run_id": actor["session_id"],
-        "source": poisoned_source,
-        "policy_decision": _policy(
-            actor,
-            operation_id=poisoned_operation,
-            operation_digest=sha256_digest(
+        start=0x24,
+    ):
+        poisoned_source = source.to_dict()
+        poisoned_source["content"] = content
+        poisoned_source["content_digest"] = sha256_digest(
+            {"content": poisoned_source["content"], "media_type": "text/markdown"}
+        )
+        poisoned_operation = f"018f0000-0000-7000-8000-{poison_number:012x}"
+        poisoned_payload = {
+            "operation_id": poisoned_operation,
+            "operation_digest": sha256_digest(
                 {"operation_id": poisoned_operation, "source": poisoned_source}
             ),
-            decision_id="018f0000-0000-7000-8000-00000000c025",
-        ),
-    }
-    with postgres_connections["writer"]() as connection, connection.cursor() as cursor:
-        with pytest.raises(Exception, match="source is invalid"):
-            cursor.execute(
-                "SELECT gah_import_github_markdown(%s::jsonb,%s::jsonb,%s::jsonb)",
-                (json.dumps(actor), json.dumps(poisoned_payload), json.dumps({})),
-            )
-        connection.rollback()
+            "run_id": actor["session_id"],
+            "source": poisoned_source,
+            "policy_decision": _policy(
+                actor,
+                operation_id=poisoned_operation,
+                operation_digest=sha256_digest(
+                    {"operation_id": poisoned_operation, "source": poisoned_source}
+                ),
+                decision_id=f"018f0000-0000-7000-8000-{poison_number + 1:012x}",
+            ),
+        }
+        with postgres_connections["writer"]() as connection, connection.cursor() as cursor:
+            with pytest.raises(Exception, match="source is invalid"):
+                cursor.execute(
+                    "SELECT gah_import_github_markdown(%s::jsonb,%s::jsonb,%s::jsonb)",
+                    (json.dumps(actor), json.dumps(poisoned_payload), json.dumps({})),
+                )
+            connection.rollback()
 
     forged = copy.deepcopy(actor)
     forged["actor_id"] = "018f0000-0000-7000-8000-00000000c023"

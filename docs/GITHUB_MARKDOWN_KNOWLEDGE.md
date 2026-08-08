@@ -18,6 +18,16 @@ accepts a branch, tag, generic URL, or credential. The application resolves
 authentication before it calls the client; neither a token nor a secret
 reference is stored in this package or its PostgreSQL tables.
 
+Before persistence, the local importer rejects known high-risk credential
+shapes and credential-assignment syntax in both the application and database
+boundaries. This is a fail-closed local guardrail, not a claim of general
+credential scanning or protected-material handling for arbitrary repositories;
+those require the later reviewed connector and secret-broker boundaries.
+When upgrading from the earlier local schema, the hardening migration takes an
+exclusive boundary lock and fails atomically if an active, unrevoked stored
+revision matches those same shapes; it never silently quarantines or exposes
+the affected content.
+
 An import requires a canonical actor context, a bounded `authorize` decision
 whose request digest covers the full source revision, and an evidence envelope.
 The source identity is `github://owner/repository/path`; its immutable revision
@@ -29,6 +39,11 @@ return no content. The authority can logically revoke a source with separately
 bound evidence; revocation removes every revision of that source from retrieval
 and permanently rejects re-import. An operation ID is durably single-use for
 this boundary: it cannot be rebound to another source or to a revocation.
+
+Import eligibility uses one PostgreSQL statement-time snapshot: a revision that
+expires during that atomic import can receive its one cited import result, but
+every subsequent retrieval evaluates the live database clock and returns no
+content.
 
 The runtime role cannot call import or revocation functions and has no table
 privileges. It can retrieve only records for the tenant/actor bound to its

@@ -30,6 +30,16 @@ _SECRET_PATTERNS = (
     re.compile(r"github_pat_[A-Za-z0-9_]{82,}"),
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"-----BEGIN [A-Z ]+PRIVATE KEY-----"),
+    re.compile(r"xox[abprs]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}"),
+    re.compile(r"AIza[A-Za-z0-9_-]{35}"),
+    re.compile(r"sk-(?:proj-)?[A-Za-z0-9_-]{20,}"),
+    re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+    re.compile(
+        r"(?:^|[^\w])[\"']?(?:password|passwd|secret|api[_-]?key|access[_-]?token|"
+        r"authorization|token)[\"']?\s*[:=]\s*[\"']?(?:bearer\s+)?[^\s\"']{8,}",
+        re.IGNORECASE,
+    ),
 )
 
 
@@ -50,7 +60,7 @@ class PinnedGithubMarkdownClient(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class PinnedGithubMarkdown:
-    """A sanitized Markdown file at one immutable Git commit."""
+    """A validated Markdown file at one immutable Git commit."""
 
     repository: str
     commit_sha: str
@@ -81,6 +91,7 @@ class PinnedGithubMarkdown:
             retention_expires_at=retention_expires_at,
         )
         preliminary._validate_locator()
+        preliminary._validate_metadata()
         content = client.read_markdown(
             repository=preliminary.repository,
             commit_sha=preliminary.commit_sha,
@@ -149,7 +160,15 @@ class PinnedGithubMarkdown:
             raise GithubMarkdownSourceError(
                 "GitHub Markdown content appears to contain credential material"
             )
-        if self.classification not in {"public", "internal", "confidential", "restricted"}:
+        self._validate_metadata()
+
+    def _validate_metadata(self) -> None:
+        if not isinstance(self.classification, str) or self.classification not in {
+            "public",
+            "internal",
+            "confidential",
+            "restricted",
+        }:
             raise GithubMarkdownSourceError("GitHub source classification is unsupported")
         if not isinstance(self.retention_expires_at, str) or not _TIMESTAMP.fullmatch(
             self.retention_expires_at
@@ -163,6 +182,8 @@ class PinnedGithubMarkdown:
             ) from error
         if parsed.tzinfo is None:
             raise GithubMarkdownSourceError("GitHub source retention expiry is malformed")
+        if parsed <= datetime.now(timezone.utc):
+            raise GithubMarkdownSourceError("GitHub source retention expiry is expired")
 
     def _validate_locator(self) -> None:
         if not isinstance(self.repository, str) or _REPOSITORY.fullmatch(self.repository) is None:

@@ -61,7 +61,7 @@ def _source(*, commit_sha: str = "a" * 40, path: str = "docs/roadmap.md"):
         path=path,
         content="# Roadmap\n\nThe MCP resource is cited and untrusted.\n",
         classification="internal",
-        retention_expires_at="2027-01-01T00:00:00.000Z",
+        retention_expires_at=_timestamp(datetime.now(timezone.utc) + timedelta(days=30)),
     )
 
 
