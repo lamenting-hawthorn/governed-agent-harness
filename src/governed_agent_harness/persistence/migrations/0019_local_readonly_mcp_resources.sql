@@ -1,5 +1,6 @@
--- Phase 5.3: local stdio MCP can enumerate and read only actor/project-bound,
--- cited GitHub Markdown resources.  This is a runtime-only read boundary.
+-- Phase 5.3: local stdio MCP can enumerate and read only actor-scoped,
+-- cited GitHub Markdown resources. The project is trusted bootstrap admission
+-- against ActorContext; Phase 5.2 stores no project key on a resource.
 -- No MCP request can select an actor, tenant, database role, or source scope.
 
 LOCK TABLE public.gah_runtime_principals IN ACCESS EXCLUSIVE MODE;
@@ -27,7 +28,7 @@ BEGIN
        OR NOT coalesce((p_actor -> 'scope_authority' -> 'allowed_levels') ? 'project', false)
        OR NOT coalesce((p_actor -> 'scope_authority' -> 'project_ids') ? p_project_id, false)
     THEN
-        RAISE EXCEPTION 'local MCP actor is outside project scope';
+        RAISE EXCEPTION 'local MCP bootstrap project is not authorized by actor context';
     END IF;
 END
 $function$;

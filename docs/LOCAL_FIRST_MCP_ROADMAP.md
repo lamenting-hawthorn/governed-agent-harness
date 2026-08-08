@@ -74,8 +74,10 @@ The exposed surface is deliberately small:
 - a resource read returning the existing cited, untrusted resource shape.
 
 There is no search tool. Listing is bounded and paginated without content;
-exact reads re-evaluate current bootstrap, project membership, database-role
-binding, source revocation, and retention. Response cache hints are
+exact reads re-evaluate current bootstrap, the bootstrap project's authority in
+the canonical ActorContext, tenant/actor database-role binding, source
+revocation, and retention. Resources remain actor-scoped because the Phase 5.2
+source schema has no project key. Response cache hints are
 `ttlMs=0` and `cacheScope=private`; no resource result is reused after a
 revocation by the server.
 

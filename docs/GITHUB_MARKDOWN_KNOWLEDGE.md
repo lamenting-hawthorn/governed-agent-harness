@@ -49,10 +49,12 @@ exactly a version, one UUIDv7 project ID, and a complete canonical
 `ActorContext`; the project must be in that context's project authority. The
 runtime DSN comes only from `GAH_RUNTIME_DATABASE_DSN`, never from the config
 or an MCP request. Each list and exact immutable-URI read opens a read-only
-runtime transaction and re-checks the actor/project against the
-database-login binding, logical revocation, and retention expiry. MCP request
-data therefore cannot choose an actor, tenant, database credential, role,
-policy, or source scope.
+runtime transaction and re-checks tenant/actor against the database-login
+binding, logical revocation, and retention expiry. The project is a trusted
+bootstrap-admission check against `ActorContext`, not a persisted source key or
+a resource filter: Phase 5.2 resources remain actor-scoped. MCP request data
+therefore cannot choose an actor, tenant, database credential, role, policy, or
+source scope.
 
 The only advertised capabilities are `resources/list` and `resources/read`.
 Listing is bounded and content-free; exact reads return the Markdown body with
@@ -77,14 +79,16 @@ write the full canonical actor record to a protected file and start the server:
 
 ```console
 chmod 600 .gah/local-mcp.json
-export GAH_RUNTIME_DATABASE_DSN='<local runtime DSN>'
-python -m governed_agent_harness.knowledge.local_mcp --config .gah/local-mcp.json
+GAH_RUNTIME_DATABASE_DSN='service=gah_local_runtime' \
+  python -m governed_agent_harness.knowledge.local_mcp --config .gah/local-mcp.json
 ```
 
 The quoted `actor_context` line above is explanatory shorthand, not a valid
-config fragment: replace it with the full validated JSON object. Keep the
-runtime DSN in the process environment and out of shell history, source files,
-and logs.
+config fragment: replace it with the full validated JSON object. The example
+uses a protected libpq service entry for a local socket/peer-auth connection;
+if a password is needed, provide it through a protected libpq passfile or a
+service manager's secure environment injection, never a password-bearing DSN
+in shell history, source files, or logs.
 
 ## Explicit non-goals
 

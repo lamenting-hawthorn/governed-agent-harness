@@ -13,6 +13,7 @@ from unittest.mock import ANY
 
 import anyio
 import pytest
+from mcp import types
 from mcp.client import Client
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.shared.exceptions import MCPError
@@ -115,19 +116,19 @@ def _import(postgres_connections, actor, source, *, operation_suffix: int, ids=N
 
 def _write_config(tmp_path, actor):
     config = tmp_path / "local-mcp.json"
-    config.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "project_id": actor["scope_authority"]["project_ids"][0],
-                "actor_context": actor,
-            },
-            sort_keys=True,
-        ),
-        encoding="utf-8",
-    )
+    config.write_text(json.dumps(_bootstrap_document(actor), sort_keys=True), encoding="utf-8")
     config.chmod(0o600)
     return config
+
+
+def _bootstrap_document(actor, *, project_id=None):
+    return {
+        "version": 1,
+        "project_id": actor["scope_authority"]["project_ids"][0]
+        if project_id is None
+        else project_id,
+        "actor_context": actor,
+    }
 
 
 def _server_parameters(postgres_connections, config):
@@ -158,21 +159,64 @@ def _knowledge_counts(postgres_connections):
         return cursor.fetchone()
 
 
-def test_local_mcp_bootstrap_is_a_closed_trusted_config_surface(tmp_path):
-    """L1 must not accept actor or database authority from an MCP request."""
+def test_local_mcp_bootstrap_rejects_every_untrusted_config_shape(tmp_path):
+    """The public bootstrap loader rejects unsafe files with one safe error boundary."""
 
-    config = tmp_path / "actor.json"
-    config.write_text("{}", encoding="utf-8")
-    config.chmod(0o600)
+    actor = copy.deepcopy(build_positive_records()["actor_context"])
+    valid = _write_config(tmp_path, actor)
+    assert load_local_mcp_config(valid) == LocalMcpConfig(
+        project_id=actor["scope_authority"]["project_ids"][0], actor_context=actor
+    )
 
-    try:
-        load_local_mcp_config(config)
-    except LocalMcpBootstrapError:
-        pass
-    else:  # pragma: no cover - defensive guard for a broken closed bootstrap.
-        raise AssertionError("empty bootstrap configuration was accepted")
+    def assert_rejected(path):
+        with pytest.raises(LocalMcpBootstrapError) as rejected:
+            load_local_mcp_config(path)
+        assert str(rejected.value) == "local MCP bootstrap is invalid"
 
-    assert LocalMcpConfig.__name__ == "LocalMcpConfig"
+    broader_mode = tmp_path / "broader-mode.json"
+    broader_mode.write_text(json.dumps(_bootstrap_document(actor)), encoding="utf-8")
+    broader_mode.chmod(0o640)
+    assert_rejected(broader_mode)
+
+    symlink = tmp_path / "symlink.json"
+    symlink.symlink_to(valid)
+    assert_rejected(symlink)
+
+    duplicate = tmp_path / "duplicate.json"
+    duplicate.write_text(
+        '{"version":1,"version":1,"project_id":'
+        + json.dumps(actor["scope_authority"]["project_ids"][0])
+        + ',"actor_context":'
+        + json.dumps(actor)
+        + "}",
+        encoding="utf-8",
+    )
+    duplicate.chmod(0o600)
+    assert_rejected(duplicate)
+
+    oversized = tmp_path / "oversized.json"
+    oversized.write_bytes(b"{" + b"x" * 65_536 + b"}")
+    oversized.chmod(0o600)
+    assert_rejected(oversized)
+
+    undeclared = tmp_path / "undeclared.json"
+    undeclared.write_text(
+        json.dumps(_bootstrap_document(actor) | {"unexpected": True}), encoding="utf-8"
+    )
+    undeclared.chmod(0o600)
+    assert_rejected(undeclared)
+
+    for name, project_id in (
+        ("malformed-project.json", "not-a-project"),
+        ("non-v7-project.json", "018f0000-0000-4000-8000-00000000d0ff"),
+        ("outside-authority-project.json", "018f0000-0000-7000-8000-00000000d0ff"),
+    ):
+        config = tmp_path / name
+        config.write_text(
+            json.dumps(_bootstrap_document(actor, project_id=project_id)), encoding="utf-8"
+        )
+        config.chmod(0o600)
+        assert_rejected(config)
 
 
 def test_local_mcp_sdk_surface_is_resource_only_and_uses_safe_errors(monkeypatch):
@@ -199,6 +243,7 @@ def test_local_mcp_sdk_surface_is_resource_only_and_uses_safe_errors(monkeypatch
     }
     listed = ListedGithubMarkdown(**common)
     cited = CitedGithubMarkdown(content=source.content, **common)
+    calls = []
 
     class RuntimeReader:
         def __init__(self, *, runtime_connect):
@@ -212,11 +257,13 @@ def test_local_mcp_sdk_surface_is_resource_only_and_uses_safe_errors(monkeypatch
             assert actor_context == actor
             assert project_id == actor["scope_authority"]["project_ids"][0]
             assert cursor is None
+            calls.append(("list", actor_context, project_id))
             return GithubMarkdownResourcePage(resources=(listed,), next_cursor=None)
 
         def read_local_mcp_resource(self, *, actor_context, project_id, revision_uri):
             assert actor_context == actor
             assert project_id == actor["scope_authority"]["project_ids"][0]
+            calls.append(("read", actor_context, project_id))
             return cited if revision_uri == source.revision_uri else None
 
     import governed_agent_harness.knowledge.local_mcp as local_mcp
@@ -228,6 +275,14 @@ def test_local_mcp_sdk_surface_is_resource_only_and_uses_safe_errors(monkeypatch
         ),
         runtime_connect=lambda: None,
     )
+    attacker_data = {
+        "actor_context": {"actor_id": "attacker"},
+        "tenant_id": "attacker-tenant",
+        "database_credential": {"kind": "attacker-controlled"},
+        "database_role": "attacker_role",
+        "policy_authority": "attacker-policy",
+        "source_scope": "all-sources",
+    }
 
     async def exercise():
         async with Client(server, mode="auto") as client:
@@ -239,11 +294,11 @@ def test_local_mcp_sdk_surface_is_resource_only_and_uses_safe_errors(monkeypatch
             assert client.server_capabilities.tools is None
             assert client.server_capabilities.prompts is None
             assert client.server_capabilities.tasks is None
-            listed_result = await client.list_resources()
+            listed_result = await client.list_resources(meta=attacker_data)
             assert listed_result.ttl_ms == 0
             assert listed_result.cache_scope == "private"
             assert listed_result.resources[0].meta == cited.local_mcp_metadata()
-            read_result = await client.read_resource(source.revision_uri)
+            read_result = await client.read_resource(source.revision_uri, meta=attacker_data)
             assert read_result.ttl_ms == 0
             assert read_result.cache_scope == "private"
             assert read_result.contents[0].text == source.content
@@ -255,13 +310,40 @@ def test_local_mcp_sdk_surface_is_resource_only_and_uses_safe_errors(monkeypatch
                 "Resource unavailable",
             )
             with pytest.raises(MCPError) as request_override:
-                await client.read_resource(source.revision_uri, request_state="actor=untrusted")
+                await client.read_resource(
+                    source.revision_uri,
+                    meta=attacker_data,
+                    request_state=json.dumps(attacker_data, sort_keys=True),
+                )
             assert (request_override.value.code, request_override.value.message) == (
                 -32602,
                 "Resource unavailable",
             )
+            assert calls == [
+                ("list", actor, actor["scope_authority"]["project_ids"][0]),
+                ("read", actor, actor["scope_authority"]["project_ids"][0]),
+                ("read", actor, actor["scope_authority"]["project_ids"][0]),
+            ]
 
     anyio.run(exercise)
+
+    async def legacy_protocol_is_rejected():
+        with pytest.raises(BaseExceptionGroup) as rejected:
+            async with Client(server, mode="legacy"):
+                pass
+
+        def leaves(error):
+            if isinstance(error, BaseExceptionGroup):
+                return [leaf for child in error.exceptions for leaf in leaves(child)]
+            return [error]
+
+        assert [
+            (error.code, error.message)
+            for error in leaves(rejected.value)
+            if isinstance(error, MCPError)
+        ] == [(types.UNSUPPORTED_PROTOCOL_VERSION, "Unsupported protocol version")]
+
+    anyio.run(legacy_protocol_is_rejected)
 
 
 def test_local_mcp_list_paginates_without_content_or_mutation(postgres_connections, tmp_path):

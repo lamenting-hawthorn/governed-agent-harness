@@ -2,8 +2,10 @@
 
 This adapter intentionally owns transport only.  PostgreSQL remains the
 authorization boundary: every list/read re-checks the trusted bootstrap actor,
-its project membership, the runtime database principal, revocation, and
-retention before returning an immutable cited resource.
+the bootstrap project's authority in that ActorContext, the runtime database
+principal's tenant/actor binding, revocation, and retention before returning an
+immutable cited resource. Resources themselves are actor-scoped; Phase 5.2
+does not persist a project key for them.
 """
 
 from __future__ import annotations

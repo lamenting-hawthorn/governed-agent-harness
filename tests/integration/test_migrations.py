@@ -129,22 +129,23 @@ def test_fresh_install_registers_migration_and_is_idempotent(
     assert all(table is not None for table in tables)
 
 
-def test_phase19_upgrade_preserves_knowledge_boundary_and_adds_runtime_mcp_reads(
+def test_phase18_upgrade_installs_private_actor_scoped_knowledge_boundary(
     migration_database: dict[str, object], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Upgrade a real phase-18 database and fingerprint the L1 read boundary."""
+    """Upgrade a real phase-17 database and fingerprint the new authority boundary."""
 
     import governed_agent_harness.persistence.migration as migration_module
 
     connect = migration_database["connect"]
     assert callable(connect)
     packaged = discover_migrations()
+    phase17 = tuple(migration for migration in packaged if migration.version <= 17)
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase17)
+    assert apply_migrations(admin_connect=connect) == phase17
+
     phase18 = tuple(migration for migration in packaged if migration.version <= 18)
     monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase18)
-    assert apply_migrations(admin_connect=connect) == phase18
-
-    monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
-    assert apply_migrations(admin_connect=connect)[-1].version == 19
+    assert apply_migrations(admin_connect=connect)[-1].version == 18
     with connect() as connection, connection.cursor() as cursor:
         cursor.execute(
             "SELECT relname, relrowsecurity, relforcerowsecurity, pg_get_userbyid(relowner) "
@@ -177,7 +178,31 @@ def test_phase19_upgrade_preserves_knowledge_boundary_and_adds_runtime_mcp_reads
             "has_function_privilege('gah_authority_writer', "
             "'public.gah_github_markdown_reserve_operation(jsonb,text,text,text,text)', 'execute'), "
             "has_function_privilege('gah_runtime', "
-            "'public.gah_retrieve_github_markdown(jsonb,text,integer)', 'execute'), "
+            "'public.gah_retrieve_github_markdown(jsonb,text,integer)', 'execute')"
+        )
+        assert cursor.fetchone() == (False, True, False, True)
+    assert apply_migrations(admin_connect=connect)[-1].version == 18
+
+
+def test_phase19_upgrade_adds_private_runtime_mcp_reads(
+    migration_database: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Upgrade a real phase-18 database without changing the Phase 5.2 ACLs."""
+
+    import governed_agent_harness.persistence.migration as migration_module
+
+    connect = migration_database["connect"]
+    assert callable(connect)
+    packaged = discover_migrations()
+    phase18 = tuple(migration for migration in packaged if migration.version <= 18)
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase18)
+    assert apply_migrations(admin_connect=connect) == phase18
+
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
+    assert apply_migrations(admin_connect=connect)[-1].version == 19
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT "
             "has_function_privilege('gah_runtime', "
             "'public.gah_mcp_assert_local_actor(jsonb,text)', 'execute'), "
             "has_function_privilege('gah_runtime', "
@@ -185,9 +210,13 @@ def test_phase19_upgrade_preserves_knowledge_boundary_and_adds_runtime_mcp_reads
             "has_function_privilege('gah_runtime', "
             "'public.gah_read_github_markdown_mcp_resource(jsonb,text,text)', 'execute'), "
             "has_function_privilege('gah_authority_writer', "
+            "'public.gah_mcp_assert_local_actor(jsonb,text)', 'execute'), "
+            "has_function_privilege('gah_authority_writer', "
+            "'public.gah_list_github_markdown_mcp_resources(jsonb,text,timestamptz,text,text,integer)', 'execute'), "
+            "has_function_privilege('gah_authority_writer', "
             "'public.gah_read_github_markdown_mcp_resource(jsonb,text,text)', 'execute')"
         )
-        assert cursor.fetchone() == (False, True, False, True, True, True, True, False)
+        assert cursor.fetchone() == (True, True, True, False, False, False)
     assert apply_migrations(admin_connect=connect)[-1].version == 19
 
 
