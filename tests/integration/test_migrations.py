@@ -70,6 +70,9 @@ def test_packaged_migrations_are_contiguous_and_checksum_exact() -> None:
         (15, "0015_verify_lifecycle_receipts_and_harden_execution.sql"),
         (16, "0016_actor_scope_execution_and_verify_lifecycle_approvals.sql"),
         (17, "0017_validate_lifecycle_actor_and_policy_bounds.sql"),
+        (18, "0018_governed_github_markdown_knowledge.sql"),
+        (19, "0019_local_readonly_mcp_resources.sql"),
+        (20, "0020_harden_github_markdown_source_boundary.sql"),
     ]
     assert migrations[0].checksum.startswith("sha256:")
     assert len(migrations[0].checksum) == 71
@@ -125,6 +128,200 @@ def test_fresh_install_registers_migration_and_is_idempotent(
     assert rows == [(item.version, item.checksum, True) for item in first]
     assert second == first
     assert all(table is not None for table in tables)
+
+
+def test_phase18_upgrade_installs_private_actor_scoped_knowledge_boundary(
+    migration_database: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Upgrade a real phase-17 database and fingerprint the new authority boundary."""
+
+    import governed_agent_harness.persistence.migration as migration_module
+
+    connect = migration_database["connect"]
+    assert callable(connect)
+    packaged = discover_migrations()
+    phase17 = tuple(migration for migration in packaged if migration.version <= 17)
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase17)
+    assert apply_migrations(admin_connect=connect) == phase17
+
+    phase18 = tuple(migration for migration in packaged if migration.version <= 18)
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase18)
+    assert apply_migrations(admin_connect=connect)[-1].version == 18
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT relname, relrowsecurity, relforcerowsecurity, pg_get_userbyid(relowner) "
+            "FROM pg_class WHERE relname IN "
+            "('gah_github_markdown_sources', 'gah_github_markdown_revisions', "
+            "'gah_github_markdown_operations') "
+            "ORDER BY relname"
+        )
+        assert cursor.fetchall() == [
+            ("gah_github_markdown_operations", True, True, "gah_schema_owner"),
+            ("gah_github_markdown_revisions", True, True, "gah_schema_owner"),
+            ("gah_github_markdown_sources", True, True, "gah_schema_owner"),
+        ]
+        cursor.execute(
+            "SELECT "
+            "has_table_privilege('gah_runtime', 'public.gah_github_markdown_sources', 'select'), "
+            "has_table_privilege('gah_authority_writer', 'public.gah_github_markdown_sources', 'select'), "
+            "has_table_privilege('gah_runtime', 'public.gah_github_markdown_revisions', 'select'), "
+            "has_table_privilege('gah_authority_writer', 'public.gah_github_markdown_revisions', 'select'), "
+            "has_table_privilege('gah_runtime', 'public.gah_github_markdown_operations', 'select'), "
+            "has_table_privilege('gah_authority_writer', 'public.gah_github_markdown_operations', 'select')"
+        )
+        assert cursor.fetchone() == (False, False, False, False, False, False)
+        cursor.execute(
+            "SELECT "
+            "has_function_privilege('gah_runtime', "
+            "'public.gah_import_github_markdown(jsonb,jsonb,jsonb)', 'execute'), "
+            "has_function_privilege('gah_authority_writer', "
+            "'public.gah_import_github_markdown(jsonb,jsonb,jsonb)', 'execute'), "
+            "has_function_privilege('gah_authority_writer', "
+            "'public.gah_github_markdown_reserve_operation(jsonb,text,text,text,text)', 'execute'), "
+            "has_function_privilege('gah_runtime', "
+            "'public.gah_retrieve_github_markdown(jsonb,text,integer)', 'execute')"
+        )
+        assert cursor.fetchone() == (False, True, False, True)
+    assert apply_migrations(admin_connect=connect)[-1].version == 18
+
+
+def test_phase20_upgrade_hardens_private_runtime_mcp_reads(
+    migration_database: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Upgrade a real phase-18 database through Phase 5.3 without rewriting v18."""
+
+    import governed_agent_harness.persistence.migration as migration_module
+
+    connect = migration_database["connect"]
+    assert callable(connect)
+    packaged = discover_migrations()
+    phase18 = tuple(migration for migration in packaged if migration.version <= 18)
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase18)
+    assert apply_migrations(admin_connect=connect) == phase18
+
+    phase19 = tuple(migration for migration in packaged if migration.version <= 19)
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase19)
+    assert apply_migrations(admin_connect=connect)[-1].version == 19
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT "
+            "has_function_privilege('gah_runtime', "
+            "'public.gah_mcp_assert_local_actor(jsonb,text)', 'execute'), "
+            "has_function_privilege('gah_runtime', "
+            "'public.gah_list_github_markdown_mcp_resources(jsonb,text,timestamptz,text,text,integer)', 'execute'), "
+            "has_function_privilege('gah_runtime', "
+            "'public.gah_read_github_markdown_mcp_resource(jsonb,text,text)', 'execute'), "
+            "has_function_privilege('gah_authority_writer', "
+            "'public.gah_mcp_assert_local_actor(jsonb,text)', 'execute'), "
+            "has_function_privilege('gah_authority_writer', "
+            "'public.gah_list_github_markdown_mcp_resources(jsonb,text,timestamptz,text,text,integer)', 'execute'), "
+            "has_function_privilege('gah_authority_writer', "
+            "'public.gah_read_github_markdown_mcp_resource(jsonb,text,text)', 'execute')"
+        )
+        assert cursor.fetchone() == (True, True, True, False, False, False)
+
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
+    assert apply_migrations(admin_connect=connect)[-1].version == 20
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT pg_get_functiondef("
+            "'public.gah_github_markdown_assert_source(jsonb)'::regprocedure), "
+            "pg_get_functiondef("
+            "'public.gah_lookup_github_markdown_revision(jsonb,text,text,text,text)'"
+            "::regprocedure), pg_get_functiondef("
+            "'public.gah_github_markdown_content_has_credential(text)'::regprocedure)"
+        )
+        source_function, lookup_function, detector_function = cursor.fetchone()
+        cursor.execute(
+            "SELECT has_function_privilege('gah_runtime', "
+            "'public.gah_github_markdown_content_has_credential(text)', 'execute'), "
+            "has_function_privilege('gah_authority_writer', "
+            "'public.gah_github_markdown_content_has_credential(text)', 'execute'), "
+            "has_function_privilege('gah_schema_owner', "
+            "'public.gah_github_markdown_content_has_credential(text)', 'execute')"
+        )
+        detector_privileges = cursor.fetchone()
+    assert "gah_github_markdown_content_has_credential" in source_function
+    assert "xox[abprs]-[A-Za-z0-9-]{10,}" in detector_function
+    assert "statement_timestamp()" in source_function
+    assert "statement_timestamp()" in lookup_function
+    assert detector_privileges == (False, False, True)
+
+
+def test_phase20_upgrade_rejects_previously_admitted_credential_content_atomically(
+    migration_database: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Phase 5.2 row that would leak through v19 prevents an unsafe v20 upgrade."""
+
+    import governed_agent_harness.persistence.migration as migration_module
+
+    connect = migration_database["connect"]
+    assert callable(connect)
+    packaged = discover_migrations()
+    phase19 = tuple(migration for migration in packaged if migration.version <= 19)
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: phase19)
+    assert apply_migrations(admin_connect=connect)[-1].version == 19
+
+    tenant_id = "018f0000-0000-7000-8000-000000000051"
+    actor_id = "018f0000-0000-7000-8000-000000000052"
+    source_identity = "github://acme/brain/docs/roadmap.md"
+    content = '{"password":"supersecret"}'
+    evidence_event_id = "018f0000-0000-7000-8000-000000000053"
+    evidence_payload_digest = "sha256:" + "a" * 64
+    evidence = {
+        "record_type": "evidence_envelope",
+        "payload_digest": evidence_payload_digest,
+        "draft": {"event_id": evidence_event_id},
+    }
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO public.gah_github_markdown_sources "
+            "(tenant_id,actor_id,source_identity,repository,source_path,created_at) "
+            "VALUES (%s,%s,%s,%s,%s,pg_catalog.clock_timestamp())",
+            (tenant_id, actor_id, source_identity, "acme/brain", "docs/roadmap.md"),
+        )
+        cursor.execute(
+            "INSERT INTO public.gah_github_markdown_revisions "
+            "(tenant_id,actor_id,source_identity,commit_sha,content_digest,import_binding_digest,"
+            "revision_uri,media_type,content,classification,retention_expires_at,evidence_json,"
+            "evidence_event_id,evidence_payload_digest,imported_at) VALUES "
+            "(%s,%s,%s,%s,%s,%s,%s,'text/markdown',%s,'internal',"
+            "pg_catalog.clock_timestamp() + interval '1 day',%s::jsonb,%s,%s,"
+            "pg_catalog.clock_timestamp())",
+            (
+                tenant_id,
+                actor_id,
+                source_identity,
+                "a" * 40,
+                "sha256:" + "b" * 64,
+                "sha256:" + "c" * 64,
+                "https://github.com/acme/brain/blob/" + "a" * 40 + "/docs/roadmap.md",
+                content,
+                json.dumps(evidence),
+                evidence_event_id,
+                evidence_payload_digest,
+            ),
+        )
+
+    monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
+    with pytest.raises(
+        Exception, match="existing GitHub Markdown revision contains credential material"
+    ):
+        apply_migrations(admin_connect=connect)
+
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT max(version), count(*) FROM public.gah_schema_migrations")
+        assert cursor.fetchone() == (19, 19)
+        cursor.execute(
+            "SELECT content FROM public.gah_github_markdown_revisions "
+            "WHERE tenant_id=%s AND actor_id=%s AND source_identity=%s",
+            (tenant_id, actor_id, source_identity),
+        )
+        assert cursor.fetchone() == (content,)
+        cursor.execute(
+            "SELECT to_regprocedure('public.gah_github_markdown_content_has_credential(text)')"
+        )
+        assert cursor.fetchone() == (None,)
 
 
 @pytest.mark.parametrize(
@@ -805,7 +1002,7 @@ def test_populated_phase12_lifecycle_state_survives_actor_key_upgrade(
             return
         monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
         applied = apply_migrations(admin_connect=connect)
-        assert applied[-1].version == 17
+        assert applied[-1].version == 20
         with connect() as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT count(*), min(evidence_event_digest) FROM gah_skill_lifecycle_transitions"
@@ -1019,6 +1216,9 @@ def test_advisory_lock_serializes_concurrent_fresh_installers(
         (15, 1),
         (16, 1),
         (17, 1),
+        (18, 1),
+        (19, 1),
+        (20, 1),
     ]
 
 
@@ -1215,10 +1415,10 @@ def test_checksum_drift_and_unknown_version_are_rejected(
             (discover_migrations()[0].checksum,),
         )
         cursor.execute(
-            "INSERT INTO gah_schema_migrations (version, checksum) VALUES (18, %s)",
+            "INSERT INTO gah_schema_migrations (version, checksum) VALUES (21, %s)",
             ("sha256:" + "1" * 64,),
         )
-    with pytest.raises(MigrationError, match="unknown migration version 0018"):
+    with pytest.raises(MigrationError, match="unknown migration version 0021"):
         apply_migrations(admin_connect=connect)
 
 
@@ -1676,7 +1876,7 @@ def test_phase16_upgrade_preserves_populated_internally_bound_actor_state(
             ),
         )
     monkeypatch.setattr(migration_module, "discover_migrations", lambda: packaged)
-    assert apply_migrations(admin_connect=connect)[-1].version == 17
+    assert apply_migrations(admin_connect=connect)[-1].version == 20
     with connect() as connection, connection.cursor() as cursor:
         cursor.execute(
             "SELECT tenant_id,actor_id,operation_id,grant_digest,command_json,grant_json "
@@ -1840,7 +2040,7 @@ def test_phase16_principal_entry_lock_waits_before_actor_binding_preflight(
                 time.sleep(0.01)
             assert waiting and not upgrade.done(), "0016 did not wait on principal entry"
             reader.commit()
-            assert upgrade.result(timeout=8)[-1].version == 17
+            assert upgrade.result(timeout=8)[-1].version == 20
     finally:
         reader.rollback()
         reader_cursor.close()
@@ -2172,8 +2372,8 @@ def test_failed_migration_rolls_back_registry_and_schema(
 
     packaged = discover_migrations()
     broken = Migration(
-        version=18,
-        name="0018_broken.sql",
+        version=21,
+        name="0021_broken.sql",
         checksum="sha256:" + "2" * 64,
         sql="CREATE TABLE gah_partial (id integer); SELECT definitely_not_a_function()",
     )

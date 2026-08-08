@@ -51,12 +51,14 @@ flowchart LR
 | Packaging and isolated wheel verification | Implemented | `pyproject.toml` and tests |
 | Bounded governance kernel | Implemented | `src/governed_agent_harness/kernel/`; injected identity and current approval trust, deterministic decisions, approval consumption, and in-memory evidence lifecycle |
 | Effect broker | Implemented, bounded | One in-process path issues an exact short-lived grant, appends intent evidence, consumes authority once, invokes an injected reversible synthetic executor, and appends outcome evidence |
-| CLI, SDK, HTTP/MCP surfaces | Planned | Future application layer |
+| Local MCP resource surface | Implemented, narrowly bounded | Local `stdio` resources/list and resources/read only; actor-bound cited GitHub Markdown retrieval, no HTTP/remote transport or tools |
+| CLI, SDK, and HTTP surfaces | Planned | Future application layer |
 | PostgreSQL governed lifecycle/effect authority | Implemented, bounded | Immutable checksummed migrations, canonical pre-effect evidence, rebuildable projection, least-privilege runtime functions, atomic intent/grant consumption, fenced leases, replay, restart, RLS, concurrency, and expired-lease recovery |
 | Actor-scoped memory retrieval and promotion | Implemented, bounded | Read-only runtime retrieval plus authority-only evidence-backed create/revise/supersede/tombstone |
 | Governed inert skill lifecycle | Implemented, bounded | Immutable inline JSON artifact revisions, explicit authority-only transitions, canonical evidence, rebuildable active projection, and runtime-only exact-digest resolution |
 | Built-in execution admission | Implemented, narrowly bounded | Authority-issued single-use grant over one exact active digest and one static deterministic no-I/O handler; canonical intent/outcome evidence, replay, fencing, recovery, and rebuild |
-| Sandbox, knowledge, and provider adapters | Planned | The current `none` isolation profile is not sandboxing and no provider executor ships |
+| Pinned GitHub Markdown knowledge | Implemented, narrowly bounded | One actor-scoped Markdown revision at an immutable commit SHA through an injected credential-free reader; exact policy/evidence binding, retention, logical revocation, cited untrusted PostgreSQL retrieval, and local read-only MCP stdio resources; no live GitHub connector, HTTP, remote MCP, or MCP tools |
+| Sandbox and provider adapters | Planned | The current `none` isolation profile is not sandboxing and no provider executor ships |
 
 ### Target completed architecture
 
@@ -161,8 +163,8 @@ flowchart LR
 | Contract foundation | Schemas, canonicalization, semantic validation, fixtures, wheel | Implemented and covered by the contract suite |
 | Governance kernel | Trusted identity, deterministic policy, approvals, evidence-first in-memory lifecycle state | Implemented and covered by public-flow, negative-path, and adversarial kernel tests |
 | Governed effects | Exact short-lived grant, sole broker, injected executor port, intent and outcome evidence | Implemented for one reversible in-process synthetic executor plus the optional PostgreSQL Phase 4 durability slice; no provider or sandbox proof |
-| Durable state | PostgreSQL evidence ledger/projections, fenced recovery, actor-scoped read-only memory retrieval, governed promotion, inert skill lifecycle, bounded built-in execution admission | Implemented for the bounded local PostgreSQL Phase 4.1–5.1 scope; arbitrary executable skills, distribution, and hosted operations are excluded |
-| Product surfaces | CLI, SDK, HTTP/MCP, diagnostics, run inspection | One documented workflow through every supported surface |
+| Durable state | PostgreSQL evidence ledger/projections, fenced recovery, actor-scoped read-only memory retrieval, governed promotion, inert skill lifecycle, bounded built-in execution admission, immutable cited source revisions, and local MCP read authority | Implemented for the bounded local PostgreSQL Phase 4.1–5.3 scope; arbitrary executable skills, distribution, live connectors, HTTP/remote transports, and hosted operations are excluded |
+| Product surfaces | CLI, SDK, HTTP, diagnostics, run inspection | One documented workflow through every supported surface; the separate local MCP resource adapter is intentionally not a general product surface |
 | Operations and integrations | Hosted storage, tenant controls, telemetry, backup/restore, optional adapters | Cross-backend conformance and operational exercises |
 | Stable release | Compatibility policy, migrations, security review, SBOM, signed artifacts | Published release evidence and explicit support boundaries |
 
@@ -194,12 +196,25 @@ flowchart LR
   actor, operation, command, grant, and request. Execution event kinds are
   reserved from the generic writer; replay, recovery, and ledger-derived
   rebuild never interpret stored artifact JSON.
+- **Phase 5.2 implemented, narrowly bounded:** imports one actor-scoped
+  Markdown file from an application-owned pinned reader only when it names a
+  full immutable Git commit SHA; it binds source revisions to exact policy and
+  evidence, supports retention and logical revocation, and returns only cited
+  untrusted context to the actor-scoped runtime role. It has no live GitHub
+  client, credential handling, source ACL synchronization, background sync, or
+  MCP transport.
+- **Phase 5.3 implemented, narrowly bounded:** exposes that existing
+  actor-scoped cited retrieval through a local `stdio` MCP 2026-07-28 server
+  with resources/list and resources/read only. Trusted local bootstrap and the
+  runtime database principal determine scope; every read rechecks authority,
+  retention, and revocation. It adds no tools, writes, remote transport, live
+  connector, or hosted-operation claim.
 - **Still deferred:** automatic/model-driven promotion, embeddings, external
   providers, project/shared scope, arbitrary or stored executable skill
-  contents, archives, dependencies, registries, hosted operations, transports,
-  product surfaces, and provider-specific effects.
+  contents, archives, dependencies, registries, hosted operations, HTTP and
+  remote transports, general product surfaces, and provider-specific effects.
 
-The bounded Phase 4–5.1 gates prove lifecycle and execution-admission integrity,
+The bounded Phase 4–5.3 gates prove lifecycle and execution-admission integrity,
 idempotency, conflict handling, retention/expiry, projection rebuild, restart
 behavior, concurrency, role separation, and tenant/actor isolation on local
 PostgreSQL. This is not hosted, staging, production, arbitrary package-execution,
@@ -499,20 +514,36 @@ inside another host can be intercepted.
 
 ### Local
 
-- CLI and optional daemon on one trusted workstation.
-- PGlite-backed storage and local content-addressed blobs.
-- Loopback-only daemon by default.
-- Interactive terminal approvals.
+- The canonical product baseline: one trusted user/project on one workstation,
+  usable without a managed account or service.
+- CLI and local `stdio` integration begin here; a daemon is loopback-only by
+  default when it is added.
+- Local identity, policy, evidence, retention, and cited retrieval remain
+  explicit and enforced. OS ownership and restricted file permissions are the
+  local security boundary.
+- Embedded PGlite storage and local content-addressed blobs are target
+  architecture. The currently implemented Phase 5.3 boundary is tested with
+  local PostgreSQL and does not yet ship an embedded store.
 
-### Hosted
+### Self-hosted
+
+- A team operates its own authenticated ingress, Postgres-compatible storage,
+  secret broker, backups, and approval delivery.
+- It exposes the same public operations and policy/evidence bindings as local;
+  deployment does not create a second authority path.
+
+### Managed cloud
 
 - Stateless daemon instances behind authenticated ingress.
 - Postgres storage, durable blob service, distributed approval delivery.
 - Database-enforced tenant isolation and centralized secret broker.
 - Background projection, reconciliation, export, and retention workers.
 
-Both modes execute the same contract tests and state machines. See
-[ADR-0004](adr/0004-local-and-hosted-storage-parity.md).
+Self-hosted and managed cloud are delivery choices, not replacements for the
+local contract. All modes execute the same contract tests and state machines;
+additional hosted claims require their own operational evidence. See
+[ADR-0004](adr/0004-local-and-hosted-storage-parity.md) and the
+[Local-first MCP roadmap](LOCAL_FIRST_MCP_ROADMAP.md).
 
 ## Compatibility and evolution
 

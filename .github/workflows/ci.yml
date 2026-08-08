@@ -84,7 +84,7 @@ jobs:
           # Keep the already verified PyNaCl sdist installed; install every
           # other test/runtime dependency explicitly so pip cannot replace it.
           python -m pip install -e . --no-deps
-          python -m pip install 'build>=1.2,<2' 'cffi>=1.4.1' 'psycopg[binary]>=3.2,<4' 'pytest>=8,<9' 'ruff>=0.12,<1' 'setuptools>=68,<81' 'wheel>=0.44,<1'
+          python -m pip install 'build>=1.2,<2' 'cffi>=1.4.1' 'mcp==2.0.0' 'psycopg[binary]>=3.2,<4' 'pytest>=8,<9' 'ruff>=0.12,<1' 'setuptools>=68,<81' 'wheel>=0.44,<1'
           python -m pip check
           python -c "import nacl; assert nacl.__version__ == '1.6.2'"
 

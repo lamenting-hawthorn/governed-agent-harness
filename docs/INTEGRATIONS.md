@@ -83,23 +83,29 @@ position.
 HTTP handlers call the same application commands as the SDK. Administrative
 routes use separate scopes and cannot be invoked with run-only credentials.
 
-### MCP
+### MCP (local stdio read-only slice)
 
-MCP maps selected commands and queries into tools and resources:
+Phase 5.3 implements one local `stdio` adapter over the canonical GitHub
+Markdown retrieval boundary. It exposes only bounded actor-scoped cited
+resources through `resources/list` and `resources/read`; it does not expose a
+search tool. The source content remains untrusted. It never exposes raw ledger
+payloads, secrets, unrestricted search, source import, memory promotion,
+approval resolution, or another write path.
 
-- resources for capabilities, run summaries, approved memory, and skill
-  metadata;
-- tools for starting/cancelling runs, proposing memory, requesting retrieval,
-  and resolving approvals where policy permits;
-- prompts only as convenience templates, never authority.
+MCP input is untrusted. An owner-only local bootstrap supplies an explicit
+project and canonical actor context, while each request is rechecked against
+the actor-bound runtime database principal. Tool parameters, resource URIs, and
+model text cannot choose actor, tenant, database credentials, database role,
+policy authority, or source scope. This remains an Observe/Advise transport,
+not evidence that host-native tools are governed.
 
-MCP input is untrusted. The server authenticates its peer where the transport
-supports it and maps the session to an `ActorContext`. Stdio defaults to local
-OS ownership; remote MCP requires authenticated transport. Tool descriptions
-must clearly state effects and approval behavior.
-
-MCP does not expose raw ledger payloads, secrets, or unrestricted memory search
-without explicit scopes.
+The protocol baseline is the [MCP 2026-07-28
+specification](https://modelcontextprotocol.io/specification/2026-07-28).
+The implemented surface uses `server/discover`, `ttlMs: 0`, and
+`cacheScope: private`. Tasks, Apps, remote transport, resource templates,
+subscriptions, prompts, tools, sampling, roots, logging controls, and write
+tools are deliberately deferred. The full sequence and gates are in the
+[Local-first MCP roadmap](LOCAL_FIRST_MCP_ROADMAP.md).
 
 ## Storage adapters
 
