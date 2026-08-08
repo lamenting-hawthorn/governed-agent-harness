@@ -9,10 +9,11 @@ not different authority models. A cloud deployment cannot gain a policy,
 identity, evidence, or data-access privilege that the local contract does not
 define.
 
-This is a plan, not a claim that an MCP server, an embedded store, a live
-GitHub connector, or any hosted deployment exists today. Phase 5.2 currently
-provides only the bounded PostgreSQL source-to-retrieval boundary described in
-[Governed GitHub Markdown knowledge](GITHUB_MARKDOWN_KNOWLEDGE.md).
+This is a plan, not a claim that an embedded store, a live GitHub connector, or
+any hosted deployment exists today. Phase 5.3 implements only the bounded local
+stdio MCP resource boundary described in [Governed GitHub Markdown
+knowledge](GITHUB_MARKDOWN_KNOWLEDGE.md); the later source and deployment
+milestones remain planned.
 
 ## Fixed trust boundary
 
@@ -54,23 +55,29 @@ must not be claimed as shipped.
 Completed in Phase 5.2: an application-owned, credential-free reader supplies
 one Markdown file at an immutable Git commit SHA. Import, retention, logical
 revocation, and actor-scoped cited retrieval are PostgreSQL-governed. There is
-no live GitHub API client, local Git reader, MCP transport, background worker,
-or source ACL synchronization.
+no live GitHub API client, local Git reader, background worker, or source ACL
+synchronization.
 
 ### L1 — local read-only MCP adapter
 
-Build a `stdio` MCP server over the existing retrieval application service.
-It is local-process only, read-only, and derives its actor from local process
-ownership plus explicit project configuration; it never trusts an actor value
-from a tool argument.
+Completed in Phase 5.3: a `stdio` MCP server over the existing retrieval
+application service. It is local-process only, read-only, and derives its
+actor from an owner-only local bootstrap plus actor-bound database authority;
+it never trusts an actor value from an MCP parameter, URI, tool argument, or
+model text. It uses MCP 2026-07-28 discovery only (`server/discover`), and
+advertises no legacy initialization capability.
 
-The first exposed surface is deliberately small:
+The exposed surface is deliberately small:
 
 - a resource listing only the actor-scoped knowledge records the caller may
   retrieve;
-- a resource read returning the existing cited, untrusted resource shape; and
-- optionally, one bounded read-only search tool if resource enumeration alone
-  is insufficient.
+- a resource read returning the existing cited, untrusted resource shape.
+
+There is no search tool. Listing is bounded and paginated without content;
+exact reads re-evaluate current bootstrap, project membership, database-role
+binding, source revocation, and retention. Response cache hints are
+`ttlMs=0` and `cacheScope=private`; no resource result is reused after a
+revocation by the server.
 
 Every result carries source identity, immutable revision, content digest,
 classification, evidence citation, scope/authority, and freshness/expiry. A
@@ -78,10 +85,12 @@ missing, expired, or revoked revision is indistinguishable from unavailable
 content to the MCP caller. There are no MCP write tools, approval-resolution
 tools, raw-ledger reads, arbitrary source URLs, or connector credentials.
 
-Use the [MCP 2026-07-28 specification](https://modelcontextprotocol.io/specification/2026-07-28)
-as the protocol baseline. The local server must declare only capabilities it
-implements and test its published resource/tool schemas. Do not add Tasks,
-MCP Apps, or a remote transport in L1.
+The implemented protocol is the [MCP 2026-07-28
+specification](https://modelcontextprotocol.io/specification/2026-07-28),
+using the official Python SDK `mcp==2.0.0`. The server declares only the two
+resource operations and is tested by a real stdio subprocess client using
+`mode="auto"`; it does not add Tasks, MCP Apps, remote transport, resource
+templates, subscriptions, prompts, tools, sampling, roots, or logging controls.
 
 ### L2 — local repository source adapter
 
@@ -123,7 +132,7 @@ set as L1; network transport does not justify write tools or background work.
 
 | Before | Required evidence |
 | --- | --- |
-| L1 merge | Local end-to-end MCP client test, actor-scope and revoked/expired negative tests, schema/capability conformance, and independent security review. |
+| L1 merge | Local end-to-end MCP client test, actor-scope and revoked/expired negative tests, schema/capability conformance, and independent security review. The code candidate supplies local-test evidence only; merge remains subject to the independent veto. |
 | L2 merge | Real local Git fixture tests for immutable revision and path containment, plus zero-mutation failure tests. |
 | L3 merge | Secret-broker and connector authority review; real GitHub integration test with a least-privilege test credential; ACL/deletion/revocation propagation evidence. |
 | L4 merge | Remote authentication and audience-binding tests, tenant-leakage adversarial tests, stateless request tests, deployment recovery evidence, and separate self-hosted/managed operational proofs. |

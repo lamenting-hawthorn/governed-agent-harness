@@ -83,29 +83,28 @@ position.
 HTTP handlers call the same application commands as the SDK. Administrative
 routes use separate scopes and cannot be invoked with run-only credentials.
 
-### MCP (planned, local-first)
+### MCP (local stdio read-only slice)
 
-No MCP transport is implemented. The Phase 5.2 resource shape is an internal
-read-only response, not an MCP server.
+Phase 5.3 implements one local `stdio` adapter over the canonical GitHub
+Markdown retrieval boundary. It exposes only bounded actor-scoped cited
+resources through `resources/list` and `resources/read`; it does not expose a
+search tool. The source content remains untrusted. It never exposes raw ledger
+payloads, secrets, unrestricted search, source import, memory promotion,
+approval resolution, or another write path.
 
-The first MCP integration is a local `stdio`, read-only adapter over the
-canonical retrieval application service. It exposes only actor-scoped cited
-knowledge resources and, if needed, one bounded read-only search tool. It does
-not expose raw ledger payloads, secrets, unrestricted search, source import,
-memory promotion, approval resolution, or any other write path.
-
-MCP input is untrusted. The local adapter derives actor context from local
-process ownership and explicit project configuration, never from tool
-arguments. Remote MCP is a later deployment profile: it authenticates every
-request, maps credentials to canonical actor and tenant context, and does not
-forward its tokens to a connector or another server. In either profile, MCP is
-an Observe/Advise transport, not evidence that host-native tools are governed.
+MCP input is untrusted. An owner-only local bootstrap supplies an explicit
+project and canonical actor context, while each request is rechecked against
+the actor-bound runtime database principal. Tool parameters, resource URIs, and
+model text cannot choose actor, tenant, database credentials, database role,
+policy authority, or source scope. This remains an Observe/Advise transport,
+not evidence that host-native tools are governed.
 
 The protocol baseline is the [MCP 2026-07-28
 specification](https://modelcontextprotocol.io/specification/2026-07-28).
-Capabilities, discovery, resources, tools, cache behavior, and telemetry are
-implemented only when tested. Tasks, Apps, remote transport, and write tools
-are deliberately deferred. The full sequence and gates are in the
+The implemented surface uses `server/discover`, `ttlMs: 0`, and
+`cacheScope: private`. Tasks, Apps, remote transport, resource templates,
+subscriptions, prompts, tools, sampling, roots, logging controls, and write
+tools are deliberately deferred. The full sequence and gates are in the
 [Local-first MCP roadmap](LOCAL_FIRST_MCP_ROADMAP.md).
 
 ## Storage adapters

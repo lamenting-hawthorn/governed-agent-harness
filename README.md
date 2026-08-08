@@ -39,8 +39,12 @@ transport, storage product, or learning workflow.
 > Markdown knowledge source through an application-injected, credential-free
 > pinned reader, evidence-backed durable revisions, logical source revocation,
 > cited read-only PostgreSQL retrieval, and an explicitly untrusted resource
-> shape. `isolation_profile="none"` is not a sandbox. Provider effects,
-> transports, general sandboxing, and hosted operations remain out of scope.
+> shape. Phase 5.3 adds a local-only MCP 2026-07-28 stdio resource adapter
+> using an owner-only project/ActorContext bootstrap and runtime-principal
+> database binding. It exposes only bounded `resources/list` and exact
+> `resources/read`; it is not remote MCP or hosted operation.
+> `isolation_profile="none"` is not a sandbox. Provider effects, general
+> sandboxing, and hosted operations remain out of scope.
 > This repository is not production-ready.
 
 ## Why this exists
@@ -77,7 +81,8 @@ flowchart LR
   Kernel["Bounded governance kernel\nidentity + policy + approvals + evidence"]
   Effects["Bounded effect broker\nreversible synthetic executor"]
   Storage["Bounded PostgreSQL lifecycle + effects"]
-  Surfaces["CLI + SDK + HTTP/MCP"]:::planned
+  LocalMcp["Local MCP stdio\nresource read/list only"]
+  Surfaces["CLI + SDK + HTTP"]:::planned
 
   classDef planned stroke-dasharray:5 5
 ```
@@ -97,8 +102,9 @@ flowchart LR
 | Governed memory promotion | Implemented, bounded | Actor-only PostgreSQL authority path with exact proposal/evidence/policy/approval bindings, atomic evidence and revision persistence, replay, concurrency, tombstones, restart, rebuild, forced RLS, and runtime denial |
 | Governed inert skill lifecycle | Implemented, bounded | Actor-only PostgreSQL install/activate/rollback/deactivate/rebuild authority; immutable inline JSON artifacts, canonical evidence, replay/concurrency, forced RLS, role separation, restart/rebuild, and runtime-only exact active-digest resolution |
 | Built-in execution admission | Implemented, narrowly bounded | Exact active digest plus request/policy/gate/approval/evidence/validity/retention binding; authority-only five-minute grant issuance; runtime-only single-use consume; one static deterministic echo handler; canonical intent/outcome evidence; replay, fencing, recovery, and rebuild |
-| Pinned GitHub Markdown knowledge | Implemented, narrowly bounded | One actor-scoped Markdown file at a full immutable SHA through an injected credential-free reader; exact policy/evidence binding, immutable revisions, logical revocation, cited untrusted PostgreSQL retrieval, and runtime/authority separation; no live GitHub connector or MCP transport |
-| CLI, SDK, HTTP/MCP, and hosted operations | Planned | Requires feature-level integration evidence |
+| Pinned GitHub Markdown knowledge | Implemented, narrowly bounded | One actor-scoped Markdown file at a full immutable SHA through an injected credential-free reader; exact policy/evidence binding, immutable revisions, logical revocation, cited untrusted PostgreSQL retrieval, runtime/authority separation, and a local-only read-only MCP stdio adapter; no live GitHub connector, remote MCP, or hosted operation |
+| Local MCP stdio resources | Implemented, narrowly bounded | MCP 2026-07-28 `resources/list` and exact `resources/read` only, owner-only project/ActorContext bootstrap, runtime-principal DB binding, private zero-TTL cache hints, and no write/approval/raw-ledger surface |
+| CLI, general SDK, HTTP/remote MCP, and hosted operations | Planned | Requires feature-level integration evidence |
 
 ## Contract foundation
 
@@ -292,8 +298,9 @@ flowchart LR
 | Contract foundation | Schemas, validation, fixtures, packaging | Implemented and covered by the contract suite |
 | Governance kernel | In-process identity propagation through an injected trust boundary, deterministic policy, exact approval binding, in-memory evidence-first lifecycle state | Implemented and covered by lifecycle tests |
 | Governed effects | Exact short-lived grant, sole effect broker, injected executor port, intent and outcome evidence | Implemented for one reversible in-process synthetic executor with no sandbox claim |
-| Durable state | PostgreSQL ledger/projections, fenced recovery, actor-scoped retrieval, governed promotion, inert skill lifecycle, bounded built-in execution admission | Implemented for the bounded Phase 4.1–5.1 local PostgreSQL boundary; arbitrary skill execution and hosted operations remain deferred |
-| Product surfaces | CLI, SDK, HTTP/MCP, diagnostics | Documented feature-level workflows through supported surfaces |
+| Durable state | PostgreSQL ledger/projections, fenced recovery, actor-scoped retrieval, governed promotion, inert skill lifecycle, bounded built-in execution admission, immutable cited source revisions, and local MCP read authority | Implemented for the bounded Phase 4.1–5.3 local PostgreSQL boundary; arbitrary skill execution, HTTP/remote transport, and hosted operations remain deferred |
+| Local MCP adapter | Local `stdio` `resources/list` and `resources/read` | Implemented only for actor-bound cited GitHub Markdown retrieval; no tools, writes, HTTP, remote transport, or hosted-operation claim |
+| Product surfaces | CLI, SDK, HTTP, diagnostics | Documented feature-level workflows through supported surfaces |
 | Hosted operations and integrations | Tenant controls, telemetry, backup/restore, optional adapters | Cross-backend conformance and operational exercises |
 | Stable release | Compatibility, migrations, security review, SBOM, signed artifacts | Published evidence and explicit support boundaries |
 

@@ -8,6 +8,7 @@ an executor or promoted to governed memory automatically.
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from collections.abc import Callable, Mapping
@@ -194,6 +195,9 @@ class CitedGithubMarkdown:
     content_digest: str
     classification: str
     citation: Mapping[str, str]
+    imported_at: str | None = None
+    retention_expires_at: str | None = None
+    freshness_checked_at: str | None = None
 
     @property
     def is_untrusted_context(self) -> bool:
@@ -202,22 +206,86 @@ class CitedGithubMarkdown:
     def as_read_only_mcp_resource(self) -> dict[str, Any]:
         """Return an MCP-compatible resource shape without starting an MCP server."""
 
+        metadata: dict[str, Any] = {
+            "source_identity": self.source_identity,
+            "repository": self.repository,
+            "commit_sha": self.commit_sha,
+            "path": self.path,
+            "content_digest": self.content_digest,
+            "classification": self.classification,
+            "citation": dict(self.citation),
+            "untrusted_context": True,
+            "read_only": True,
+        }
+        if self.imported_at is not None:
+            metadata.update(self.local_mcp_metadata())
         return {
             "uri": self.revision_uri,
             "mimeType": "text/markdown",
             "text": self.content,
-            "metadata": {
-                "source_identity": self.source_identity,
-                "repository": self.repository,
-                "commit_sha": self.commit_sha,
-                "path": self.path,
-                "content_digest": self.content_digest,
-                "classification": self.classification,
-                "citation": dict(self.citation),
-                "untrusted_context": True,
-                "read_only": True,
-            },
+            "metadata": metadata,
         }
+
+    def local_mcp_metadata(self) -> dict[str, Any]:
+        """Return metadata permitted on the local MCP resource transport."""
+
+        if (
+            self.imported_at is None
+            or self.retention_expires_at is None
+            or self.freshness_checked_at is None
+        ):
+            raise GithubMarkdownSourceError("GitHub knowledge resource metadata is unavailable")
+        return _local_mcp_metadata(
+            source_identity=self.source_identity,
+            repository=self.repository,
+            commit_sha=self.commit_sha,
+            path=self.path,
+            content_digest=self.content_digest,
+            classification=self.classification,
+            citation=self.citation,
+            imported_at=self.imported_at,
+            retention_expires_at=self.retention_expires_at,
+            freshness_checked_at=self.freshness_checked_at,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ListedGithubMarkdown:
+    """Content-free metadata for one local MCP resource-list entry."""
+
+    source_identity: str
+    revision_uri: str
+    repository: str
+    commit_sha: str
+    path: str
+    content_digest: str
+    classification: str
+    citation: Mapping[str, str]
+    imported_at: str
+    retention_expires_at: str
+    freshness_checked_at: str
+
+    def local_mcp_metadata(self) -> dict[str, Any]:
+        return _local_mcp_metadata(
+            source_identity=self.source_identity,
+            repository=self.repository,
+            commit_sha=self.commit_sha,
+            path=self.path,
+            content_digest=self.content_digest,
+            classification=self.classification,
+            citation=self.citation,
+            imported_at=self.imported_at,
+            retention_expires_at=self.retention_expires_at,
+            freshness_checked_at=self.freshness_checked_at,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class GithubMarkdownResourcePage:
+    """A bounded actor-scoped local-MCP resource page."""
+
+    resources: tuple[ListedGithubMarkdown, ...]
+    next_cursor: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -434,6 +502,97 @@ class PostgresGithubMarkdownReader:
             raise GithubMarkdownSourceError("GitHub knowledge retrieval returned malformed data")
         return tuple(_cited(item) for item in value)
 
+    def verify_local_mcp_bootstrap(
+        self, *, actor_context: Mapping[str, Any], project_id: str
+    ) -> None:
+        """Prove a local bootstrap is bound to a runtime-only database principal."""
+
+        actor = ActorContext(actor_context).to_dict()
+        _validate_project_id(project_id)
+        try:
+            with self._connect() as connection, connection.cursor() as cursor:
+                _open_read_only_runtime_transaction(cursor)
+                cursor.execute(
+                    "SELECT gah_mcp_assert_local_actor(%s::jsonb,%s)",
+                    (_json(actor), project_id),
+                )
+        except Exception as error:
+            raise GithubMarkdownSourceError("local MCP bootstrap is unavailable") from error
+
+    def list_local_mcp_resources(
+        self,
+        *,
+        actor_context: Mapping[str, Any],
+        project_id: str,
+        cursor: str | None = None,
+        page_size: int = 25,
+    ) -> GithubMarkdownResourcePage:
+        """List content-free resources through the current DB authority binding."""
+
+        actor = ActorContext(actor_context).to_dict()
+        _validate_project_id(project_id)
+        if (
+            isinstance(page_size, bool)
+            or not isinstance(page_size, int)
+            or not 1 <= page_size <= 50
+        ):
+            raise GithubMarkdownSourceError("local MCP resource page limit is malformed")
+        after = _decode_local_mcp_cursor(cursor)
+        try:
+            with self._connect() as connection, connection.cursor() as database_cursor:
+                _open_read_only_runtime_transaction(database_cursor)
+                database_cursor.execute(
+                    "SELECT gah_list_github_markdown_mcp_resources("
+                    "%s::jsonb,%s,%s::timestamptz,%s,%s,%s)",
+                    (
+                        _json(actor),
+                        project_id,
+                        after["imported_at"] if after is not None else None,
+                        after["source_identity"] if after is not None else None,
+                        after["commit_sha"] if after is not None else None,
+                        page_size,
+                    ),
+                )
+                row = database_cursor.fetchone()
+        except Exception as error:
+            raise GithubMarkdownSourceError("local MCP resource list is unavailable") from error
+        value = row[0] if row is not None else []
+        if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+            raise GithubMarkdownSourceError("local MCP resource list is unavailable")
+        listed = tuple(_listed(item) for item in value)
+        visible = listed[:page_size]
+        next_cursor = _encode_local_mcp_cursor(visible[-1]) if len(listed) > page_size else None
+        return GithubMarkdownResourcePage(resources=visible, next_cursor=next_cursor)
+
+    def read_local_mcp_resource(
+        self,
+        *,
+        actor_context: Mapping[str, Any],
+        project_id: str,
+        revision_uri: str,
+    ) -> CitedGithubMarkdown | None:
+        """Read one exact immutable URI or return no resource without a visibility leak."""
+
+        actor = ActorContext(actor_context).to_dict()
+        _validate_project_id(project_id)
+        if not isinstance(revision_uri, str) or not revision_uri or len(revision_uri) > 2048:
+            return None
+        try:
+            with self._connect() as connection, connection.cursor() as cursor:
+                _open_read_only_runtime_transaction(cursor)
+                cursor.execute(
+                    "SELECT gah_read_github_markdown_mcp_resource(%s::jsonb,%s,%s)",
+                    (_json(actor), project_id, revision_uri),
+                )
+                row = cursor.fetchone()
+        except Exception as error:
+            raise GithubMarkdownSourceError("local MCP resource is unavailable") from error
+        if row is None or row[0] is None:
+            return None
+        if not isinstance(row[0], dict):
+            raise GithubMarkdownSourceError("local MCP resource is unavailable")
+        return _local_mcp_cited(row[0])
+
 
 def _validate_import_policy(
     *,
@@ -514,6 +673,228 @@ def _cited(value: Mapping[str, Any]) -> CitedGithubMarkdown:
     )
 
 
+def _listed(value: Mapping[str, Any]) -> ListedGithubMarkdown:
+    fields = (
+        "source_identity",
+        "revision_uri",
+        "repository",
+        "commit_sha",
+        "path",
+        "content_digest",
+        "classification",
+        "imported_at",
+        "retention_expires_at",
+        "freshness_checked_at",
+    )
+    _validate_local_mcp_result(value, fields=fields)
+    return ListedGithubMarkdown(
+        source_identity=value["source_identity"],
+        revision_uri=value["revision_uri"],
+        repository=value["repository"],
+        commit_sha=value["commit_sha"],
+        path=value["path"],
+        content_digest=value["content_digest"],
+        classification=value["classification"],
+        citation={
+            "evidence_id": value["citation"]["evidence_id"],
+            "payload_digest": value["citation"]["payload_digest"],
+        },
+        imported_at=value["imported_at"],
+        retention_expires_at=value["retention_expires_at"],
+        freshness_checked_at=value["freshness_checked_at"],
+    )
+
+
+def _local_mcp_cited(value: Mapping[str, Any]) -> CitedGithubMarkdown:
+    fields = (
+        "source_identity",
+        "revision_uri",
+        "repository",
+        "commit_sha",
+        "path",
+        "content",
+        "content_digest",
+        "classification",
+        "imported_at",
+        "retention_expires_at",
+        "freshness_checked_at",
+    )
+    _validate_local_mcp_result(value, fields=fields)
+    return CitedGithubMarkdown(
+        source_identity=value["source_identity"],
+        revision_uri=value["revision_uri"],
+        repository=value["repository"],
+        commit_sha=value["commit_sha"],
+        path=value["path"],
+        content=value["content"],
+        content_digest=value["content_digest"],
+        classification=value["classification"],
+        citation={
+            "evidence_id": value["citation"]["evidence_id"],
+            "payload_digest": value["citation"]["payload_digest"],
+        },
+        imported_at=value["imported_at"],
+        retention_expires_at=value["retention_expires_at"],
+        freshness_checked_at=value["freshness_checked_at"],
+    )
+
+
+def _validate_local_mcp_result(value: Mapping[str, Any], *, fields: tuple[str, ...]) -> None:
+    citation = value.get("citation")
+    if (
+        not isinstance(citation, Mapping)
+        or set(citation) != {"evidence_id", "payload_digest"}
+        or any(not isinstance(citation.get(field), str) for field in citation)
+        or any(not isinstance(value.get(field), str) for field in fields)
+    ):
+        raise GithubMarkdownSourceError("local MCP resource is unavailable")
+    _validate_source_identity(value["source_identity"])
+    try:
+        PinnedGithubMarkdown(
+            repository=value["repository"],
+            commit_sha=value["commit_sha"],
+            path=value["path"],
+            content="x",
+            classification=value["classification"],
+            retention_expires_at=value["retention_expires_at"],
+        )._validate_locator()
+    except GithubMarkdownSourceError as error:
+        raise GithubMarkdownSourceError("local MCP resource is unavailable") from error
+    if value["source_identity"] != f"github://{value['repository']}/{value['path']}":
+        raise GithubMarkdownSourceError("local MCP resource is unavailable")
+    if value["revision_uri"] != (
+        f"https://github.com/{value['repository']}/blob/{value['commit_sha']}/{value['path']}"
+    ):
+        raise GithubMarkdownSourceError("local MCP resource is unavailable")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", value["content_digest"]):
+        raise GithubMarkdownSourceError("local MCP resource is unavailable")
+    if value["classification"] not in {"public", "internal", "confidential", "restricted"}:
+        raise GithubMarkdownSourceError("local MCP resource is unavailable")
+    for field in ("imported_at", "retention_expires_at", "freshness_checked_at"):
+        _validate_utc_timestamp(value[field], "local MCP resource")
+
+
+def _local_mcp_metadata(
+    *,
+    source_identity: str,
+    repository: str,
+    commit_sha: str,
+    path: str,
+    content_digest: str,
+    classification: str,
+    citation: Mapping[str, str],
+    imported_at: str,
+    retention_expires_at: str,
+    freshness_checked_at: str,
+) -> dict[str, Any]:
+    return {
+        "source_identity": source_identity,
+        "repository": repository,
+        "commit_sha": commit_sha,
+        "path": path,
+        "content_digest": content_digest,
+        "classification": classification,
+        "citation": dict(citation),
+        "untrusted_context": True,
+        "read_only": True,
+        "scope": "actor-scoped",
+        "authority": "database-runtime-principal-bound",
+        "imported_at": imported_at,
+        "retention_enforced": True,
+        "expires_at": retention_expires_at,
+        "freshness": {
+            "state": "eligible_at_read",
+            "checked_at": freshness_checked_at,
+        },
+    }
+
+
+def _encode_local_mcp_cursor(resource: ListedGithubMarkdown) -> str:
+    payload = json.dumps(
+        {
+            "commit_sha": resource.commit_sha,
+            "imported_at": resource.imported_at,
+            "source_identity": resource.source_identity,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
+
+
+def _decode_local_mcp_cursor(cursor: str | None) -> dict[str, str] | None:
+    if cursor is None:
+        return None
+    if (
+        not isinstance(cursor, str)
+        or not cursor
+        or len(cursor) > 512
+        or re.fullmatch(r"[A-Za-z0-9_-]+", cursor) is None
+    ):
+        raise GithubMarkdownSourceError("local MCP resource cursor is malformed")
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        value = json.loads(
+            base64.urlsafe_b64decode(padded.encode("ascii")), object_pairs_hook=_unique_object
+        )
+    except (UnicodeError, ValueError, json.JSONDecodeError) as error:
+        raise GithubMarkdownSourceError("local MCP resource cursor is malformed") from error
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"commit_sha", "imported_at", "source_identity"}
+        or any(not isinstance(item, str) for item in value.values())
+    ):
+        raise GithubMarkdownSourceError("local MCP resource cursor is malformed")
+    _validate_source_identity(value["source_identity"])
+    if _COMMIT_SHA.fullmatch(value["commit_sha"]) is None:
+        raise GithubMarkdownSourceError("local MCP resource cursor is malformed")
+    _validate_utc_timestamp(value["imported_at"], "local MCP resource cursor")
+    return value
+
+
+def _unique_object(items: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in items:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _validate_project_id(project_id: str) -> None:
+    if not isinstance(project_id, str) or _UUID_V7.fullmatch(project_id) is None:
+        raise GithubMarkdownSourceError("local MCP project identifier is malformed")
+
+
+def _validate_utc_timestamp(value: str, label: str) -> None:
+    if not isinstance(value, str) or _TIMESTAMP.fullmatch(value) is None:
+        raise GithubMarkdownSourceError(f"{label} timestamp is malformed")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise GithubMarkdownSourceError(f"{label} timestamp is malformed") from error
+    if parsed.tzinfo is None:
+        raise GithubMarkdownSourceError(f"{label} timestamp is malformed")
+
+
+def _open_read_only_runtime_transaction(cursor: Any) -> None:
+    """Reject a privileged or writable connection before every L1 read."""
+
+    cursor.execute("SET TRANSACTION READ ONLY")
+    cursor.execute(
+        "SELECT current_user = session_user, "
+        "(SELECT rolcanlogin AND NOT rolsuper AND NOT rolcreatedb "
+        "AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls "
+        "FROM pg_catalog.pg_roles WHERE rolname = session_user), "
+        "pg_catalog.pg_has_role(session_user, 'gah_runtime', 'MEMBER'), "
+        "pg_catalog.pg_has_role(session_user, 'gah_authority_writer', 'MEMBER'), "
+        "pg_catalog.pg_has_role(session_user, 'gah_skill_lifecycle_authority', 'MEMBER'), "
+        "pg_catalog.pg_has_role(session_user, 'gah_execution_admission_authority', 'MEMBER')"
+    )
+    if cursor.fetchone() != (True, True, True, False, False, False):
+        raise GithubMarkdownSourceError("local MCP runtime principal is unavailable")
+
+
 def _validate_uuid(value: str, label: str) -> None:
     if not isinstance(value, str) or _UUID_V7.fullmatch(value) is None:
         raise GithubMarkdownSourceError(f"{label} must be a UUIDv7")
@@ -548,6 +929,8 @@ def _json(value: Mapping[str, Any]) -> str:
 __all__ = [
     "CitedGithubMarkdown",
     "GithubMarkdownSourceError",
+    "GithubMarkdownResourcePage",
+    "ListedGithubMarkdown",
     "PinnedGithubMarkdown",
     "PinnedGithubMarkdownClient",
     "PostgresGithubMarkdownAuthority",
