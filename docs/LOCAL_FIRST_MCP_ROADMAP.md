@@ -44,9 +44,9 @@ untrusted source input
 
 Local does not mean security-free: local identity depends on OS ownership and
 restricted data permissions. It does mean that the default product workflow
-does not require hosted control-plane access. The current Phase 5.2 proof is a
-local PostgreSQL test boundary; embedded local storage remains planned and
-must not be claimed as shipped.
+does not require hosted control-plane access. The Phase 5.2 source boundary
+and Phase 5.3 MCP adapter proof are local PostgreSQL test boundaries; embedded
+local storage remains planned and must not be claimed as shipped.
 
 ## Delivery sequence
 
